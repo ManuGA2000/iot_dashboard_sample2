@@ -879,196 +879,241 @@ const ProfessionalIoTDashboard = () => {
       }
     };
 
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{
-        background: 'linear-gradient(135deg, #0a0e1a 0%, #1a1f3a 25%, #2a2f4a 50%, #1a1f3a 75%, #0a0e1a 100%)',
-      }}>
-        {/* Background Effects - Keep exactly as original */}
-        <div className="fixed inset-0 pointer-events-none overflow-hidden">
-          <div className="absolute inset-0 opacity-20" style={{
-            backgroundImage: `
-            radial-gradient(circle at 20% 20%, rgba(0, 255, 255, 0.15) 0%, transparent 50%),
-            radial-gradient(circle at 80% 80%, rgba(0, 100, 255, 0.15) 0%, transparent 50%),
-            radial-gradient(circle at 40% 60%, rgba(100, 0, 255, 0.15) 0%, transparent 50%)
-          `
-          }}></div>
+return (
+  <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden" style={{
+    background: 'linear-gradient(135deg, #0a0e1a 0%, #1a1f3a 25%, #2a2f4a 50%, #1a1f3a 75%, #0a0e1a 100%)'
+  }}>
+    {/* Animated Background Elements */}
+    <div className="absolute inset-0 overflow-hidden">
+      <div className="absolute top-0 left-0 w-full h-full opacity-30" style={{
+        backgroundImage: `
+          radial-gradient(circle at 20% 20%, rgba(0, 255, 255, 0.1) 0%, transparent 50%),
+          radial-gradient(circle at 80% 80%, rgba(0, 100, 255, 0.1) 0%, transparent 50%),
+          radial-gradient(circle at 40% 60%, rgba(100, 0, 255, 0.1) 0%, transparent 50%)
+        `
+      }}></div>
+
+      {/* Floating Elements */}
+      <div className="absolute inset-0">
+        {[...Array(20)].map((_, i) => (
+          <div
+            key={i}
+            className="absolute w-2 h-2 bg-cyan-400/20 rounded-full animate-pulse"
+            style={{
+              left: `${Math.random() * 100}%`,
+              top: `${Math.random() * 100}%`,
+              animationDelay: `${Math.random() * 2}s`,
+              animationDuration: `${2 + Math.random() * 3}s`
+            }}
+          />
+        ))}
+      </div>
+
+      {/* Grid Pattern */}
+      <div className="absolute inset-0 opacity-5" style={{
+        backgroundImage: `
+          linear-gradient(rgba(0, 255, 255, 0.3) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(0, 255, 255, 0.3) 1px, transparent 1px)
+        `,
+        backgroundSize: '40px 40px'
+      }}></div>
+    </div>
+
+    <div className="w-full max-w-md mx-4 relative z-10">
+      {/* Logo - Keep exactly as original */}
+      <div className="text-center mb-8">
+        <div className="w-20 h-20 mx-auto mb-4 rounded-xl bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center animate-pulse" style={{
+          boxShadow: '0 0 30px rgba(0, 255, 255, 0.4)'
+        }}>
+          <Shield className="w-10 h-10 text-white" />
         </div>
+        <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 mb-2">
+          ELPRO IoT Control
+        </h1>
+        <p className="text-gray-400">Secure Access Portal</p>
+      </div>
 
-        <div className="w-full max-w-md mx-4 relative z-10">
-          {/* Logo - Keep exactly as original */}
-          <div className="text-center mb-8">
-            <div className="w-20 h-20 mx-auto mb-4 rounded-xl bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center animate-pulse" style={{
-              boxShadow: '0 0 30px rgba(0, 255, 255, 0.4)'
-            }}>
-              <Shield className="w-10 h-10 text-white" />
-            </div>
-            <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 mb-2">
-              ELPRO IoT Control
-            </h1>
-            <p className="text-gray-400">Secure Access Portal</p>
-          </div>
-
-          {/* Keep Original Three Tabs Exactly */}
-          <div className="flex mb-6 bg-gray-900/60 backdrop-blur-sm rounded-xl p-1 border border-cyan-500/20">
-            {[
-              { id: 'admin', label: 'Admin' },
-              { id: 'supervisor', label: 'Supervisor' },
-              { id: 'guard', label: 'Guard' }
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => {
-                  setLoginType(tab.id);
-                  setIsSignUp(false); // Reset to signin when switching tabs
-                  setError('');
-                  setFormData({ username: '', email: '', password: '', confirmPassword: '' });
-                }}
-                className={`flex-1 py-3 px-4 rounded-lg text-sm font-medium transition-all duration-200 ${loginType === tab.id
-                  ? 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-lg'
-                  : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
-                  }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Login Form - Keep exactly as original */}
-          <div className="bg-gray-900/60 backdrop-blur-sm border border-cyan-500/20 rounded-xl p-6">
-            {/* Sign Up/Sign In Toggle for Admin Only */}
-            {loginType === 'admin' && (
-              <div className="flex mb-6 bg-gray-800/50 rounded-lg p-1">
-                <button
-                  onClick={() => {
-                    setIsSignUp(false);
-                    setError('');
-                    setFormData({ username: '', email: '', password: '', confirmPassword: '' });
-                  }}
-                  className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${!isSignUp ? 'bg-cyan-600 text-white' : 'text-gray-400 hover:text-white'
-                    }`}
-                >
-                  Sign In
-                </button>
-                <button
-                  onClick={() => {
-                    setIsSignUp(true);
-                    setError('');
-                    setFormData({ username: '', email: '', password: '', confirmPassword: '' });
-                  }}
-                  className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${isSignUp ? 'bg-cyan-600 text-white' : 'text-gray-400 hover:text-white'
-                    }`}
-                >
-                  Sign Up
-                </button>
-              </div>
-            )}
-
-            <h2 className="text-xl font-semibold text-white mb-6 text-center">
-              {loginType === 'admin'
-                ? (isSignUp ? 'Create Admin Account' : 'Admin Sign In')
-                : `${loginType.charAt(0).toUpperCase() + loginType.slice(1)} Sign In`
-              }
-            </h2>
-
-            {error && (
-              <div className="mb-4 p-3 bg-red-500/20 border border-red-400/30 rounded-lg flex items-center space-x-2">
-                <AlertCircle className="w-5 h-5 text-red-400" />
-                <span className="text-red-400 text-sm">{error}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Username</label>
-                <input
-                  type="text"
-                  value={formData.username}
-                  onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                  className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all"
-                  placeholder="Enter your username"
-                  required
-                />
-              </div>
-
-              {/* Email field only for admin signup */}
-              {isSignUp && loginType === 'admin' && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Email</label>
-                  <input
-                    type="email"
-                    value={formData.email}
-                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                    className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all"
-                    placeholder="Enter your email"
-                    required
-                  />
-                </div>
-              )}
-
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Password</label>
-                <input
-                  type="password"
-                  value={formData.password}
-                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all"
-                  placeholder="Enter your password"
-                  required
-                />
-              </div>
-
-              {/* Confirm password only for admin signup */}
-              {isSignUp && loginType === 'admin' && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Confirm Password</label>
-                  <input
-                    type="password"
-                    value={formData.confirmPassword}
-                    onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
-                    className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all"
-                    placeholder="Confirm your password"
-                    required
-                  />
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-3 px-4 bg-gradient-to-r from-cyan-500 via-blue-600 to-purple-600 text-white font-medium rounded-lg hover:from-cyan-400 hover:via-blue-500 hover:to-purple-500 transition-all duration-300 transform hover:scale-105 disabled:opacity-50 disabled:transform-none flex items-center justify-center space-x-2"
-              >
-                {loading ? (
-                  <>
-                    <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                    <span>Processing...</span>
-                  </>
-                ) : (
-                  <span>
-                    {loginType === 'admin'
-                      ? (isSignUp ? 'Create Account' : 'Sign In')
-                      : 'Sign In'
-                    }
-                  </span>
-                )}
-              </button>
-            </form>
-
-            {/* Info message for non-admin users */}
-            {loginType !== 'admin' && (
-              <div className="mt-4 p-3 bg-blue-500/20 border border-blue-400/30 rounded-lg">
-                <div className="flex items-center space-x-2">
-                  <Info className="w-4 h-4 text-blue-400" />
-                  <span className="text-blue-400 text-sm">
-                    {loginType.charAt(0).toUpperCase() + loginType.slice(1)} accounts are created by administrators.
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
+      {/* Role Selector Tabs - UI/UX from paste2 */}
+      <div className="mb-8">
+        <div className="flex space-x-2 p-1 bg-gray-800/50 rounded-xl border border-cyan-500/20">
+          {[
+            { id: 'admin', label: 'Admin', icon: Shield, color: 'purple' },
+            { id: 'supervisor', label: 'Supervisor', icon: Eye, color: 'blue' },
+            { id: 'guard', label: 'Guard', icon: User, color: 'green' }
+          ].map(({ id, label, icon: Icon, color }) => (
+            <button
+              key={id}
+              onClick={() => {
+                setLoginType(id);
+                setIsSignUp(false); // Reset to signin when switching tabs
+                setError('');
+                setFormData({ username: '', email: '', password: '', confirmPassword: '' });
+              }}
+              className={`flex-1 flex items-center justify-center space-x-2 py-3 px-4 rounded-lg font-medium transition-all transform hover:scale-105 ${loginType === id
+                ? color === 'purple' ? 'bg-gradient-to-r from-purple-500 to-blue-600 text-white shadow-lg'
+                  : color === 'blue' ? 'bg-gradient-to-r from-blue-500 to-cyan-600 text-white shadow-lg'
+                    : 'bg-gradient-to-r from-emerald-500 to-green-600 text-white shadow-lg'
+                : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
+                }`}
+            >
+              <Icon className="w-4 h-4" />
+              <span className="text-sm">{label}</span>
+            </button>
+          ))}
         </div>
       </div>
-    );
-  };
+
+      {/* Login Form - UI/UX from paste2 */}
+      <div className="bg-gray-900/80 backdrop-blur-xl border border-${loginType === 'admin' ? 'purple-500/30' : loginType === 'supervisor' ? 'blue-500/30' : 'emerald-500/30'} rounded-2xl p-8 shadow-2xl transform hover:scale-105 transition-all duration-300" style={{
+        boxShadow: `0 0 60px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.3), inset 0 0 60px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.05)`
+      }}>
+        {/* Sign Up/Sign In Toggle for Admin Only */}
+        {loginType === 'admin' && (
+          <div className="flex space-x-2 mb-6 p-1 bg-gray-800/50 rounded-lg">
+            <button
+              onClick={() => {
+                setIsSignUp(false);
+                setError('');
+                setFormData({ username: '', email: '', password: '', confirmPassword: '' });
+              }}
+              className={`flex-1 py-2 px-4 rounded-md font-medium transition-all ${!isSignUp ? 'bg-purple-500 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              Sign In
+            </button>
+            <button
+              onClick={() => {
+                setIsSignUp(true);
+                setError('');
+                setFormData({ username: '', email: '', password: '', confirmPassword: '' });
+              }}
+              className={`flex-1 py-2 px-4 rounded-md font-medium transition-all ${isSignUp ? 'bg-purple-500 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              Sign Up
+            </button>
+          </div>
+        )}
+
+        {/* Logo/Header */}
+        <div className="text-center mb-8">
+          <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-400 via-blue-500 to-cyan-600' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-500 to-teal-600' : 'from-emerald-400 via-teal-500 to-green-600'} flex items-center justify-center relative animate-pulse" style={{
+            boxShadow: `0 0 40px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.5)`
+          }}>
+            {loginType === 'admin' ? <Shield className="w-10 h-10 text-white" /> : loginType === 'supervisor' ? <Eye className="w-10 h-10 text-white" /> : <User className="w-10 h-10 text-white" />}
+            <div className="absolute inset-0 rounded-full border border-${loginType === 'admin' ? 'purple-400/50' : loginType === 'supervisor' ? 'blue-400/50' : 'emerald-400/50'} animate-spin" style={{ animationDuration: '3s' }}></div>
+            <div className="absolute inset-2 rounded-full border border-${loginType === 'admin' ? 'blue-400/30' : loginType === 'supervisor' ? 'cyan-400/30' : 'teal-400/30'} animate-spin" style={{ animationDuration: '2s', animationDirection: 'reverse' }}></div>
+          </div>
+          <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-400 via-blue-400 to-cyan-400' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-400 to-teal-400' : 'from-emerald-400 via-teal-400 to-green-400'} animate-pulse">
+            {loginType === 'admin' ? 'Administrator' : loginType === 'supervisor' ? 'Supervisor' : 'Security Guard'}
+          </h1>
+          <p className="text-gray-400 text-sm mt-2">
+            {loginType === 'admin' ? (isSignUp ? 'Create Admin Account' : 'Full System Control') : loginType === 'supervisor' ? 'Management Control' : 'Operational Access'}
+          </p>
+          <div className="w-full h-1 bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-400 via-blue-500 to-cyan-600' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-500 to-teal-600' : 'from-emerald-400 via-teal-500 to-green-600'} rounded-full mt-4 animate-pulse"></div>
+        </div>
+
+        {error && (
+          <div className="mb-6 p-3 bg-red-500/20 border border-red-400/30 rounded-lg flex items-center space-x-2">
+            <AlertCircle className="w-5 h-5 text-red-400" />
+            <span className="text-red-400 text-sm">{error}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div>
+            <label className={`block text-sm font-medium mb-2 ${loginType === 'admin' ? 'text-purple-300' : loginType === 'supervisor' ? 'text-blue-300' : 'text-emerald-300'}`}>Username</label>
+            <input
+              type="text"
+              value={formData.username}
+              onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+              className={`w-full px-4 py-3 bg-gray-800/50 border border-${loginType === 'admin' ? 'purple-500/30' : loginType === 'supervisor' ? 'blue-500/30' : 'emerald-500/30'} rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-${loginType === 'admin' ? 'purple-400' : loginType === 'supervisor' ? 'blue-400' : 'emerald-400'} focus:ring-2 focus:ring-${loginType === 'admin' ? 'purple-400/20' : loginType === 'supervisor' ? 'blue-400/20' : 'emerald-400/20'} transition-all transform focus:scale-105`}
+              placeholder={loginType === 'admin' ? (isSignUp ? 'Choose a username' : 'Enter admin username') : `Enter ${loginType} username`}
+              required
+            />
+          </div>
+
+          {/* Email field only for admin signup */}
+          {isSignUp && loginType === 'admin' && (
+            <div>
+              <label className="block text-sm font-medium text-purple-300 mb-2">Email Address *</label>
+              <input
+                type="email"
+                value={formData.email}
+                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                className="w-full px-4 py-3 bg-gray-800/50 border border-purple-500/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all transform focus:scale-105"
+                placeholder="Enter your email address"
+                required
+              />
+            </div>
+          )}
+
+          <div>
+            <label className={`block text-sm font-medium mb-2 ${loginType === 'admin' ? 'text-purple-300' : loginType === 'supervisor' ? 'text-blue-300' : 'text-emerald-300'}`}>Password</label>
+            <input
+              type="password"
+              value={formData.password}
+              onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+              className={`w-full px-4 py-3 bg-gray-800/50 border border-${loginType === 'admin' ? 'purple-500/30' : loginType === 'supervisor' ? 'blue-500/30' : 'emerald-500/30'} rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-${loginType === 'admin' ? 'purple-400' : loginType === 'supervisor' ? 'blue-400' : 'emerald-400'} focus:ring-2 focus:ring-${loginType === 'admin' ? 'purple-400/20' : loginType === 'supervisor' ? 'blue-400/20' : 'emerald-400/20'} transition-all transform focus:scale-105`}
+              placeholder={loginType === 'admin' ? (isSignUp ? 'Create a password (min 6 chars)' : 'Enter admin password') : `Enter ${loginType} password`}
+              required
+            />
+          </div>
+
+          {/* Confirm password only for admin signup */}
+          {isSignUp && loginType === 'admin' && (
+            <div>
+              <label className="block text-sm font-medium text-purple-300 mb-2">Confirm Password *</label>
+              <input
+                type="password"
+                value={formData.confirmPassword}
+                onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+                className="w-full px-4 py-3 bg-gray-800/50 border border-purple-500/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all transform focus:scale-105"
+                placeholder="Confirm your password"
+                required
+              />
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            className={`w-full py-3 px-4 bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-500 via-blue-600 to-cyan-600' : loginType === 'supervisor' ? 'from-blue-500 via-cyan-600 to-teal-600' : 'from-emerald-500 via-teal-600 to-green-600'} text-white font-medium rounded-lg hover:bg-gradient-to-r hover:${loginType === 'admin' ? 'from-purple-400 via-blue-500 to-cyan-500' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-500 to-teal-500' : 'from-emerald-400 via-teal-500 to-green-500'} focus:outline-none focus:ring-2 focus:ring-${loginType === 'admin' ? 'purple-400/50' : loginType === 'supervisor' ? 'blue-400/50' : 'emerald-400/50'} transition-all duration-300 transform hover:scale-105 relative overflow-hidden disabled:opacity-50 disabled:transform-none`}
+            style={{ boxShadow: `0 0 30px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.4)` }}
+          >
+            <span className="relative z-10">
+              {loading ? (
+                <>
+                  <div className="inline-block w-5 h-5 mr-2 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  Processing...
+                </>
+              ) : (
+                <span>
+                  {loginType === 'admin'
+                    ? (isSignUp ? 'Create Account' : 'Sign In')
+                    : 'Sign In'
+                  }
+                </span>
+              )}
+            </span>
+            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent transform -skew-x-12 translate-x-full hover:translate-x-[-200%] transition-transform duration-700"></div>
+          </button>
+        </form>
+
+        {/* Info message for non-admin users */}
+        {loginType !== 'admin' && (
+          <div className="mt-6 p-4 bg-blue-500/10 border border-blue-400/30 rounded-lg">
+            <div className="flex items-center space-x-2">
+              <Info className="w-4 h-4 text-blue-400" />
+              <span className="text-blue-400 text-sm">
+                {loginType.charAt(0).toUpperCase() + loginType.slice(1)} accounts are created by administrators.
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  </div>
+);
+};
 
   // Navigation menu items based on role
   const getMenuItems = () => {
