@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   Home, Settings, Users, FileText, Shield, Power,
@@ -9,7 +8,7 @@ import {
   Play, Pause, RotateCcw, User, Calendar, BarChart3,
   Camera, Mail, Phone, Lock, Globe, Radio, Lightbulb,
   Target, Move, Layers, TrendingUp, Database, Cpu,
-  Check, UserPlus, UserMinus, AlertCircle, KeyRound, Info
+  Check, UserPlus, UserMinus, AlertCircle, KeyRound, Info, Building
 } from 'lucide-react';
 import InteractiveMap from './components/InteractiveMap';
 import realTimeService from './services/realTimeService';
@@ -17,14 +16,18 @@ import { debounce } from 'lodash';
 import cognitoService from './CognitoService';
 import { AWS_CONFIG } from './CognitoService';
 
+import AWS from 'aws-sdk';
 
-
-
-
+// Add this after the AWS import
+const cognitoIdentityServiceProvider = new AWS.CognitoIdentityServiceProvider({
+  apiVersion: '2016-04-18',
+  region: AWS_CONFIG.region,
+});
 
 const ProfessionalIoTDashboard = () => {
   // User and UI state
   const [currentUser, setCurrentUser] = useState(null);
+  const [currentTenant, setCurrentTenant] = useState(null);
   const [activeTab, setActiveTab] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -42,8 +45,6 @@ const ProfessionalIoTDashboard = () => {
   const [selectedGroup, setSelectedGroup] = useState('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedMapDevice, setSelectedMapDevice] = useState(null);
-
-
   const [controlMode, setControlMode] = useState('scenario');
 
   // Add these states with your other state declarations
@@ -55,10 +56,8 @@ const ProfessionalIoTDashboard = () => {
   const [showAddGroupModal, setShowAddGroupModal] = useState(false);
   const [awsThings, setAwsThings] = useState([]);
 
-
-
   const [logoVersion, setLogoVersion] = useState(0);
-
+  const [tenantLogo, setTenantLogo] = useState(null);
 
   const [newGroup, setNewGroup] = useState({
     name: '',
@@ -73,7 +72,6 @@ const ProfessionalIoTDashboard = () => {
   const lastDevicesHashRef = useRef('');
   const pendingUpdatesRef = useRef(new Map());
 
-
   const addToStatusHistory = useCallback((deviceData) => {
     setStatusHistory(prev => {
       const newEntry = {
@@ -83,7 +81,8 @@ const ProfessionalIoTDashboard = () => {
         features: deviceData.features,
         timestamp: deviceData.timestamp || Date.now(),
         message: deviceData.message || `Device ${deviceData.id} status updated`,
-        time: new Date().toLocaleTimeString()
+        time: new Date().toLocaleTimeString(),
+        tenantId: currentTenant?.tenantId
       };
 
       // FIXED: Enhanced duplicate detection
@@ -114,11 +113,25 @@ const ProfessionalIoTDashboard = () => {
       console.log('📝 Added to status history:', newEntry.message);
       return newHistory;
     });
-  }, []);
+  }, [currentTenant]);
+
+  // Load tenant logo
+  useEffect(() => {
+    const loadTenantLogo = async () => {
+      if (currentTenant) {
+        try {
+          const logoUrl = await cognitoService.getTenantLogo();
+          setTenantLogo(logoUrl);
+        } catch (error) {
+          console.warn('Failed to load tenant logo:', error);
+        }
+      }
+    };
+
+    loadTenantLogo();
+  }, [currentTenant]);
 
   // FIXED: Stable event handlers using useCallback with proper dependencies
-  // FIXED: Prevent unnecessary re-renders by memoizing the device status update
-  // MINIMAL CHANGE: Replace this function in your frontend (paste-3.txt)
   const handleDeviceStatusUpdate = useCallback((data) => {
     if (!data.deviceId || !data.device) {
       return;
@@ -136,6 +149,7 @@ const ProfessionalIoTDashboard = () => {
         ...currentDevice,
         ...data.device,
         id: data.deviceId,
+        tenantId: currentTenant?.tenantId,
         features: data.device.features || currentDevice.features || {
           siren: false,
           beacon: false,
@@ -149,10 +163,6 @@ const ProfessionalIoTDashboard = () => {
           relay4: false
         }
       };
-
-      // REMOVED: Don't recalculate status in frontend - use what backend sends
-      // Just use the status that comes from backend directly
-      // The backend will now always send 'online' when device is connected
 
       // FIXED: More thorough comparison to prevent unnecessary updates
       const currentDeviceString = JSON.stringify({
@@ -208,7 +218,7 @@ const ProfessionalIoTDashboard = () => {
         timestamp: Date.now()
       });
     }
-  }, [addToStatusHistory]);
+  }, [addToStatusHistory, currentTenant]);
 
   const handleDeviceCreated = useCallback((device) => {
     console.log('📱 Device created event received:', device);
@@ -216,9 +226,9 @@ const ProfessionalIoTDashboard = () => {
     setDevices(prev => {
       const exists = prev.some(d => d.id === device.id);
       if (exists) {
-        return prev.map(d => d.id === device.id ? device : d);
+        return prev.map(d => d.id === device.id ? { ...device, tenantId: currentTenant?.tenantId } : d);
       }
-      return [...prev, device];
+      return [...prev, { ...device, tenantId: currentTenant?.tenantId }];
     });
 
     addToStatusHistory({
@@ -227,7 +237,7 @@ const ProfessionalIoTDashboard = () => {
       message: `AWS IoT Thing ${device.name} registered successfully`,
       timestamp: Date.now()
     });
-  }, []);
+  }, [currentTenant, addToStatusHistory]);
 
   const handleScenarioExecuted = useCallback((data) => {
     console.log('🎭 Scenario executed event received:', data);
@@ -237,7 +247,7 @@ const ProfessionalIoTDashboard = () => {
       message: `Scenario executed: ${data.scenario?.name || 'Unknown'}`,
       timestamp: Date.now()
     });
-  }, []);
+  }, [addToStatusHistory]);
 
   const handleCommandSent = useCallback((data) => {
     console.log('📤 Command sent event received:', data);
@@ -247,61 +257,12 @@ const ProfessionalIoTDashboard = () => {
       message: `Command sent: ${data.command || 'Unknown command'}`,
       timestamp: Date.now()
     });
-  }, []);
+  }, [addToStatusHistory]);
 
   const handleConnectionStatus = useCallback((data) => {
     console.log('🔌 Connection status update:', data);
     setConnectionStatus(data.status === 'connected' ? 'connected' : 'disconnected');
   }, []);
-
-
-
-  // FIXED: Proper initialization with prevent double initialization
-  useEffect(() => {
-    if (initializeRef.current || isServiceInitializedRef.current) {
-      return;
-    }
-
-    initializeRef.current = true;
-
-    const initializeService = async () => {
-      try {
-        console.log('🚀 Initializing dashboard...');
-        setConnectionStatus('connecting');
-
-        // FIXED: Initialize service only once
-        if (!isServiceInitializedRef.current) {
-          await realTimeService.initialize();
-          isServiceInitializedRef.current = true;
-        }
-
-        setConnectionStatus('connected');
-
-        // Load initial data
-        await loadInitialData();
-
-        // Set up event listeners
-        setupEventListeners();
-
-        console.log('✅ Dashboard initialization complete');
-
-      } catch (error) {
-        console.error('❌ Failed to initialize dashboard:', error);
-        setConnectionStatus('error');
-      }
-    };
-
-    initializeService();
-
-    // FIXED: Cleanup function that doesn't trigger re-initialization
-    return () => {
-      console.log('🧹 Cleaning up dashboard...');
-      cleanupEventListeners();
-      // Don't disconnect service here to prevent re-initialization issues
-    };
-  }, []); // FIXED: Empty dependency array
-
-
 
   // Add this with your other event handlers
   const handleAckTimeout = useCallback((data) => {
@@ -331,7 +292,7 @@ const ProfessionalIoTDashboard = () => {
       ['scenario_executed', realTimeService.on('scenario_executed', handleScenarioExecuted)],
       ['command_sent', realTimeService.on('command_sent', handleCommandSent)],
       ['connection_status', realTimeService.on('connection_status', handleConnectionStatus)],
-      ['ack_timeout', realTimeService.on('ack_timeout', handleAckTimeout)] // NEW: ACK timeout handler
+      ['ack_timeout', realTimeService.on('ack_timeout', handleAckTimeout)]
     ]);
 
     eventListenersRef.current = listeners;
@@ -349,20 +310,85 @@ const ProfessionalIoTDashboard = () => {
     eventListenersRef.current.clear();
   }, []);
 
-  // FIXED: Memoized data loading
-  // Update your existing loadInitialData function
+  // FIXED: Proper initialization with prevent double initialization
+  useEffect(() => {
+    if (initializeRef.current || isServiceInitializedRef.current) {
+      return;
+    }
+
+    initializeRef.current = true;
+
+    const initializeService = async () => {
+      try {
+        console.log('🚀 Initializing dashboard...');
+        setConnectionStatus('connecting');
+
+        // FIXED: Initialize service with tenant context
+        if (!isServiceInitializedRef.current) {
+          await realTimeService.initialize(currentTenant?.tenantId);
+          isServiceInitializedRef.current = true;
+        }
+
+        setConnectionStatus('connected');
+
+        // FIXED: Only load data if we have tenant context
+        if (currentTenant?.tenantId) {
+          realTimeService.setTenantContext(currentTenant.tenantId);
+          await loadInitialData();
+        }
+
+        // Set up event listeners
+        setupEventListeners();
+
+        console.log('✅ Dashboard initialization complete');
+
+      } catch (error) {
+        console.error('❌ Failed to initialize dashboard:', error);
+        setConnectionStatus('error');
+      }
+    };
+
+    initializeService();
+
+    // FIXED: Cleanup function that doesn't trigger re-initialization
+    return () => {
+      console.log('🧹 Cleaning up dashboard...');
+      cleanupEventListeners();
+    };
+  }, [currentTenant]); // Add currentTenant as dependency
+
+  // FIXED: Memoized data loading with tenant context
   const loadInitialData = useCallback(async () => {
     try {
-      console.log('📋 Loading initial data from AWS...');
+      console.log('📋 Loading initial data from AWS for tenant:', currentTenant?.tenantId);
+
+      if (!currentTenant?.tenantId) {
+        console.warn('⚠️ No tenant context available for initial data load');
+        return;
+      }
+
+      // FIXED: Set tenant context before fetching
+      realTimeService.setTenantContext(currentTenant.tenantId);
 
       const [devicesResponse, groupsResponse] = await Promise.all([
-        realTimeService.fetchDevices(),
-        realTimeService.fetchGroups()
+        realTimeService.fetchDevices(currentTenant.tenantId),
+        realTimeService.fetchGroups(currentTenant.tenantId)
       ]);
 
       if (devicesResponse.success) {
         console.log('📋 Loaded devices from AWS:', devicesResponse.devices);
-        setDevices(devicesResponse.devices);
+        console.log('📋 Number of devices loaded:', devicesResponse.devices.length);
+
+        const tenantDevices = devicesResponse.devices
+          .filter(device => device.tenantId === currentTenant.tenantId)
+          .map(device => ({
+            ...device,
+            tenantId: currentTenant.tenantId
+          }));
+
+        console.log('📋 Filtered tenant devices:', tenantDevices.length);
+        setDevices(tenantDevices);
+        console.log('✅ Initial devices set in state for tenant:', currentTenant.tenantId);
       } else {
         console.error('❌ Failed to load devices:', devicesResponse.error);
         setDevices([]);
@@ -372,7 +398,7 @@ const ProfessionalIoTDashboard = () => {
         console.log('📁 Loaded groups:', groupsResponse.groups);
 
         // Filter out locally deleted groups
-        const deletedGroups = JSON.parse(localStorage.getItem('deletedGroups') || '[]');
+        const deletedGroups = JSON.parse(localStorage.getItem(`deletedGroups_${currentTenant?.tenantId}`) || '[]');
         const filteredGroups = groupsResponse.groups.filter(group => !deletedGroups.includes(group.id));
 
         setGroups(filteredGroups);
@@ -386,22 +412,37 @@ const ProfessionalIoTDashboard = () => {
       setDevices([]);
       setGroups([]);
     }
-  }, []);
+  }, [currentTenant]);
 
-  // FIXED: Load devices and groups from backend
-  // Update your existing loadDevicesGroupsAndThings function
+  // FIXED: Load devices and groups from backend with tenant context
   const loadDevicesGroupsAndThings = useCallback(async () => {
     try {
-      console.log('📋 Loading devices and groups...');
+      console.log('📋 Loading devices and groups for tenant:', currentTenant?.tenantId);
+
+      if (!currentTenant?.tenantId) {
+        console.warn('⚠️ No tenant context available');
+        return;
+      }
+
+      // FIXED: Set tenant context before fetching
+      realTimeService.setTenantContext(currentTenant.tenantId);
 
       const [devicesResponse, groupsResponse] = await Promise.all([
-        realTimeService.fetchDevices(),
-        realTimeService.fetchGroups()
+        realTimeService.fetchDevices(currentTenant.tenantId),
+        realTimeService.fetchGroups(currentTenant.tenantId)
       ]);
 
       if (devicesResponse.success) {
         console.log('📋 Loaded devices:', devicesResponse.devices);
-        setDevices(devicesResponse.devices);
+        console.log('📋 Setting devices in state:', devicesResponse.devices.length, 'devices');
+
+        const tenantDevices = devicesResponse.devices.map(device => ({
+          ...device,
+          tenantId: currentTenant.tenantId
+        }));
+
+        setDevices(tenantDevices);
+        console.log('✅ Devices set in state for tenant:', currentTenant.tenantId);
 
         // Store devices in realTimeService for consistency
         devicesResponse.devices.forEach(device => {
@@ -415,7 +456,7 @@ const ProfessionalIoTDashboard = () => {
         console.log('📁 Loaded groups:', groupsResponse.groups);
 
         // Filter out locally deleted groups
-        const deletedGroups = JSON.parse(localStorage.getItem('deletedGroups') || '[]');
+        const deletedGroups = JSON.parse(localStorage.getItem(`deletedGroups_${currentTenant?.tenantId}`) || '[]');
         const filteredGroups = groupsResponse.groups.filter(group => !deletedGroups.includes(group.id));
 
         setGroups(filteredGroups);
@@ -426,7 +467,7 @@ const ProfessionalIoTDashboard = () => {
     } catch (error) {
       console.error('Error loading data:', error);
     }
-  }, []);
+  }, [currentTenant]);
 
   // FIXED: Update device in state
   const updateDeviceInState = useCallback((deviceId, updatedDevice) => {
@@ -444,30 +485,26 @@ const ProfessionalIoTDashboard = () => {
       newDevices[deviceIndex] = {
         ...newDevices[deviceIndex],
         ...updatedDevice,
-        // Ensure we preserve the ID
-        id: deviceId
+        id: deviceId,
+        tenantId: currentTenant?.tenantId
       };
 
       console.log('✅ Device state updated:', deviceId, newDevices[deviceIndex]);
       return newDevices;
     });
-  }, []);
-
-
+  }, [currentTenant]);
 
   // FIXED: Stable device management functions with proper error handling
   const addDevice = useCallback(async (deviceData) => {
     try {
-      console.log('📝 Adding device:', deviceData);
+      console.log('📝 Adding device for tenant:', currentTenant?.tenantId, deviceData);
+
+      // ADD THIS LINE - Set tenant context before registering
+      realTimeService.setTenantContext(currentTenant?.tenantId);
 
       const response = await realTimeService.registerDevice({
-        thingName: deviceData.thingName,
-        name: deviceData.name,
-        location: deviceData.location,
-        lat: deviceData.lat,
-        lng: deviceData.lng,
-        group: deviceData.group,
-        relayConfig: deviceData.relayConfig
+        ...deviceData,
+        tenantId: currentTenant?.tenantId
       });
 
       if (response.success) {
@@ -480,13 +517,13 @@ const ProfessionalIoTDashboard = () => {
       console.error('❌ Error adding device:', error);
       throw error;
     }
-  }, []);
+  }, [currentTenant]);
 
   const removeDevice = useCallback(async (deviceId) => {
     try {
       console.log('🗑️ Removing device:', deviceId);
 
-      const response = await realTimeService.deleteDeviceCompat(deviceId);
+      const response = await realTimeService.deleteDeviceCompat(deviceId, currentTenant?.tenantId);
 
       if (response.success) {
         console.log('✅ Device removed successfully');
@@ -508,7 +545,7 @@ const ProfessionalIoTDashboard = () => {
       console.error('❌ Error removing device:', error);
       throw error;
     }
-  }, []);
+  }, [currentTenant]);
 
   const updateDevice = useCallback((deviceId, updates) => {
     setDevices(prev => prev.map(device =>
@@ -678,15 +715,36 @@ const ProfessionalIoTDashboard = () => {
   useEffect(() => {
     if (currentUser && !activeTab) {
       if (currentUser.role === 'admin') {
-        setActiveTab('home'); // Dashboard for admin
+        setActiveTab('home');
       } else if (currentUser.role === 'supervisor') {
-        setActiveTab('assets'); // Assets page for supervisor
+        setActiveTab('assets');
       } else if (currentUser.role === 'guard') {
-        setActiveTab('control'); // Control page for guard
+        setActiveTab('control');
       }
     }
   }, [currentUser, activeTab]);
 
+
+  // Add this useEffect after your existing useEffects (around line 300):
+  // Update the useEffect that handles tenant context loading
+  useEffect(() => {
+    const loadTenantData = async () => {
+      if (currentTenant?.tenantId && isServiceInitializedRef.current) {
+        console.log('🏢 Tenant context changed, loading data for:', currentTenant.tenantId);
+        console.log('👤 User role:', currentUser?.role);
+
+        // Set tenant context in service
+        realTimeService.setTenantContext(currentTenant.tenantId);
+
+        // Load tenant-specific data for ALL user roles
+        await loadDevicesGroupsAndThings();
+
+        console.log('✅ Tenant data loaded for role:', currentUser?.role);
+      }
+    };
+
+    loadTenantData();
+  }, [currentTenant?.tenantId, currentUser?.role, loadDevicesGroupsAndThings]);
 
   useEffect(() => {
     const handleStorageChange = () => {
@@ -714,7 +772,6 @@ const ProfessionalIoTDashboard = () => {
     return () => window.removeEventListener('resize', checkMobile);
   }, [isMobile]);
 
-
   // Add this useEffect in your component:
   useEffect(() => {
     document.body.style.background = 'linear-gradient(135deg, #0a0e1a 0%, #1a1f3a 25%, #2a2f4a 50%, #1a1f3a 75%, #0a0e1a 100%)';
@@ -726,56 +783,32 @@ const ProfessionalIoTDashboard = () => {
     };
   }, []);
 
-  // FIXED: Memoized computed values to prevent unnecessary re-calculations
-  // CHANGE ONLY THE STATS: Count "active" devices as also being "online"
-  // FIXED: Updated device stats calculation in your frontend
-  // Replace your existing deviceStats calculation with this:
-
+  // Device stats calculation with tenant context
   const deviceStats = useMemo(() => {
     // Count all devices that are NOT offline as online (includes both 'online' and 'active+online')
     const onlineDevices = devices.filter(d => d.status !== 'offline').length;
-
     const totalDevices = devices.length;
-
-    // FIXED: Count devices as active ONLY if they have active features OR status contains 'active'
     const activeDevices = devices.filter(d => {
-      // Check if device has any active features
       const hasActiveFeatures = d.features && Object.values(d.features).some(feature => feature === true);
-
-      // MINIMAL CHANGE: Device is active only if it has active features
       return hasActiveFeatures;
     }).length;
-
-    // Count only devices with 'offline' status as offline
     const offlineDevices = devices.filter(d => d.status === 'offline').length;
 
-    console.log('📊 Device Stats Debug:', {
+    console.log('📊 Device Stats Debug for tenant:', currentTenant?.tenantId, {
       totalDevices,
-      onlineDevices, // All non-offline devices
-      activeDevices, // Only devices with active features
-      offlineDevices // Only 'offline' status devices
+      onlineDevices,
+      activeDevices,
+      offlineDevices
     });
 
-    console.log('📊 Active Devices Breakdown:',
-      devices.filter(d => {
-        const hasActiveFeatures = d.features && Object.values(d.features).some(feature => feature === true);
-        return hasActiveFeatures;
-      }).map(d => ({
-        id: d.id,
-        status: d.status,
-        activeFeatures: Object.entries(d.features || {}).filter(([k, v]) => v).map(([k]) => k)
-      }))
-    );
-
     return {
-      online: onlineDevices, // All connected devices
+      online: onlineDevices,
       total: totalDevices,
-      active: activeDevices, // Only devices with active features
+      active: activeDevices,
       offline: offlineDevices
     };
-  }, [devices]);
+  }, [devices, currentTenant]);
 
-  // FIX 3: Make sure your getStatusDisplay function handles all status types:
   const getStatusDisplay = (status) => {
     switch (status) {
       case 'online': return { text: 'ONLINE', class: 'bg-emerald-500/20 text-emerald-400 border-emerald-400/30' };
@@ -785,7 +818,6 @@ const ProfessionalIoTDashboard = () => {
       default: return { text: 'UNKNOWN', class: 'bg-gray-500/20 text-gray-400 border-gray-400/30' };
     }
   };
-
 
   // FIXED: Memoized filtered devices
   const filteredDevices = useMemo(() => {
@@ -808,6 +840,7 @@ const ProfessionalIoTDashboard = () => {
         const sessionResult = await cognitoService.getCurrentUser();
         if (sessionResult.success) {
           setCurrentUser(sessionResult.user);
+          setCurrentTenant(sessionResult.tenant);
         }
       } catch (error) {
         console.error('Failed to initialize authentication:', error);
@@ -817,8 +850,7 @@ const ProfessionalIoTDashboard = () => {
     initializeAuth();
   }, []);
 
-  // Login Form Component
-  // FIXED: Enhanced Login Form Component with Signup functionality
+  // Enhanced Login Form Component with tenant display
   const LoginForm = () => {
     const [loginType, setLoginType] = useState('admin');
     const [isSignUp, setIsSignUp] = useState(false);
@@ -852,7 +884,7 @@ const ProfessionalIoTDashboard = () => {
           );
 
           if (result.success) {
-            alert('Account created! Please check your email for verification link.');
+            alert('Admin account created! Please check your email for verification link. You will have your own isolated organization environment.');
             setIsSignUp(false);
             setFormData({ username: '', email: '', password: '', confirmPassword: '' });
           } else {
@@ -868,6 +900,7 @@ const ProfessionalIoTDashboard = () => {
               return;
             }
             setCurrentUser(result.user);
+            setCurrentTenant(result.tenant);
           } else {
             setError(result.error);
           }
@@ -879,241 +912,252 @@ const ProfessionalIoTDashboard = () => {
       }
     };
 
-return (
-  <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden" style={{
-    background: 'linear-gradient(135deg, #0a0e1a 0%, #1a1f3a 25%, #2a2f4a 50%, #1a1f3a 75%, #0a0e1a 100%)'
-  }}>
-    {/* Animated Background Elements */}
-    <div className="absolute inset-0 overflow-hidden">
-      <div className="absolute top-0 left-0 w-full h-full opacity-30" style={{
-        backgroundImage: `
-          radial-gradient(circle at 20% 20%, rgba(0, 255, 255, 0.1) 0%, transparent 50%),
-          radial-gradient(circle at 80% 80%, rgba(0, 100, 255, 0.1) 0%, transparent 50%),
-          radial-gradient(circle at 40% 60%, rgba(100, 0, 255, 0.1) 0%, transparent 50%)
-        `
-      }}></div>
-
-      {/* Floating Elements */}
-      <div className="absolute inset-0">
-        {[...Array(20)].map((_, i) => (
-          <div
-            key={i}
-            className="absolute w-2 h-2 bg-cyan-400/20 rounded-full animate-pulse"
-            style={{
-              left: `${Math.random() * 100}%`,
-              top: `${Math.random() * 100}%`,
-              animationDelay: `${Math.random() * 2}s`,
-              animationDuration: `${2 + Math.random() * 3}s`
-            }}
-          />
-        ))}
-      </div>
-
-      {/* Grid Pattern */}
-      <div className="absolute inset-0 opacity-5" style={{
-        backgroundImage: `
-          linear-gradient(rgba(0, 255, 255, 0.3) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(0, 255, 255, 0.3) 1px, transparent 1px)
-        `,
-        backgroundSize: '40px 40px'
-      }}></div>
-    </div>
-
-    <div className="w-full max-w-md mx-4 relative z-10">
-      {/* Logo - Keep exactly as original */}
-      <div className="text-center mb-8">
-        <div className="w-20 h-20 mx-auto mb-4 rounded-xl bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center animate-pulse" style={{
-          boxShadow: '0 0 30px rgba(0, 255, 255, 0.4)'
-        }}>
-          <Shield className="w-10 h-10 text-white" />
-        </div>
-        <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 mb-2">
-          ELPRO IoT Control
-        </h1>
-        <p className="text-gray-400">Secure Access Portal</p>
-      </div>
-
-      {/* Role Selector Tabs - UI/UX from paste2 */}
-      <div className="mb-8">
-        <div className="flex space-x-2 p-1 bg-gray-800/50 rounded-xl border border-cyan-500/20">
-          {[
-            { id: 'admin', label: 'Admin', icon: Shield, color: 'purple' },
-            { id: 'supervisor', label: 'Supervisor', icon: Eye, color: 'blue' },
-            { id: 'guard', label: 'Guard', icon: User, color: 'green' }
-          ].map(({ id, label, icon: Icon, color }) => (
-            <button
-              key={id}
-              onClick={() => {
-                setLoginType(id);
-                setIsSignUp(false); // Reset to signin when switching tabs
-                setError('');
-                setFormData({ username: '', email: '', password: '', confirmPassword: '' });
-              }}
-              className={`flex-1 flex items-center justify-center space-x-2 py-3 px-4 rounded-lg font-medium transition-all transform hover:scale-105 ${loginType === id
-                ? color === 'purple' ? 'bg-gradient-to-r from-purple-500 to-blue-600 text-white shadow-lg'
-                  : color === 'blue' ? 'bg-gradient-to-r from-blue-500 to-cyan-600 text-white shadow-lg'
-                    : 'bg-gradient-to-r from-emerald-500 to-green-600 text-white shadow-lg'
-                : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
-                }`}
-            >
-              <Icon className="w-4 h-4" />
-              <span className="text-sm">{label}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Login Form - UI/UX from paste2 */}
-      <div className="bg-gray-900/80 backdrop-blur-xl border border-${loginType === 'admin' ? 'purple-500/30' : loginType === 'supervisor' ? 'blue-500/30' : 'emerald-500/30'} rounded-2xl p-8 shadow-2xl transform hover:scale-105 transition-all duration-300" style={{
-        boxShadow: `0 0 60px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.3), inset 0 0 60px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.05)`
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden" style={{
+        background: 'linear-gradient(135deg, #0a0e1a 0%, #1a1f3a 25%, #2a2f4a 50%, #1a1f3a 75%, #0a0e1a 100%)'
       }}>
-        {/* Sign Up/Sign In Toggle for Admin Only */}
-        {loginType === 'admin' && (
-          <div className="flex space-x-2 mb-6 p-1 bg-gray-800/50 rounded-lg">
-            <button
-              onClick={() => {
-                setIsSignUp(false);
-                setError('');
-                setFormData({ username: '', email: '', password: '', confirmPassword: '' });
-              }}
-              className={`flex-1 py-2 px-4 rounded-md font-medium transition-all ${!isSignUp ? 'bg-purple-500 text-white' : 'text-gray-400 hover:text-white'}`}
-            >
-              Sign In
-            </button>
-            <button
-              onClick={() => {
-                setIsSignUp(true);
-                setError('');
-                setFormData({ username: '', email: '', password: '', confirmPassword: '' });
-              }}
-              className={`flex-1 py-2 px-4 rounded-md font-medium transition-all ${isSignUp ? 'bg-purple-500 text-white' : 'text-gray-400 hover:text-white'}`}
-            >
-              Sign Up
-            </button>
-          </div>
-        )}
+        {/* Animated Background Elements */}
+        <div className="absolute inset-0 overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-full opacity-30" style={{
+            backgroundImage: `
+             radial-gradient(circle at 20% 20%, rgba(0, 255, 255, 0.1) 0%, transparent 50%),
+             radial-gradient(circle at 80% 80%, rgba(0, 100, 255, 0.1) 0%, transparent 50%),
+             radial-gradient(circle at 40% 60%, rgba(100, 0, 255, 0.1) 0%, transparent 50%)
+           `
+          }}></div>
 
-        {/* Logo/Header */}
-        <div className="text-center mb-8">
-          <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-400 via-blue-500 to-cyan-600' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-500 to-teal-600' : 'from-emerald-400 via-teal-500 to-green-600'} flex items-center justify-center relative animate-pulse" style={{
-            boxShadow: `0 0 40px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.5)`
-          }}>
-            {loginType === 'admin' ? <Shield className="w-10 h-10 text-white" /> : loginType === 'supervisor' ? <Eye className="w-10 h-10 text-white" /> : <User className="w-10 h-10 text-white" />}
-            <div className="absolute inset-0 rounded-full border border-${loginType === 'admin' ? 'purple-400/50' : loginType === 'supervisor' ? 'blue-400/50' : 'emerald-400/50'} animate-spin" style={{ animationDuration: '3s' }}></div>
-            <div className="absolute inset-2 rounded-full border border-${loginType === 'admin' ? 'blue-400/30' : loginType === 'supervisor' ? 'cyan-400/30' : 'teal-400/30'} animate-spin" style={{ animationDuration: '2s', animationDirection: 'reverse' }}></div>
+          {/* Floating Elements */}
+          <div className="absolute inset-0">
+            {[...Array(20)].map((_, i) => (
+              <div
+                key={i}
+                className="absolute w-2 h-2 bg-cyan-400/20 rounded-full animate-pulse"
+                style={{
+                  left: `${Math.random() * 100}%`,
+                  top: `${Math.random() * 100}%`,
+                  animationDelay: `${Math.random() * 2}s`,
+                  animationDuration: `${2 + Math.random() * 3}s`
+                }}
+              />
+            ))}
           </div>
-          <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-400 via-blue-400 to-cyan-400' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-400 to-teal-400' : 'from-emerald-400 via-teal-400 to-green-400'} animate-pulse">
-            {loginType === 'admin' ? 'Administrator' : loginType === 'supervisor' ? 'Supervisor' : 'Security Guard'}
-          </h1>
-          <p className="text-gray-400 text-sm mt-2">
-            {loginType === 'admin' ? (isSignUp ? 'Create Admin Account' : 'Full System Control') : loginType === 'supervisor' ? 'Management Control' : 'Operational Access'}
-          </p>
-          <div className="w-full h-1 bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-400 via-blue-500 to-cyan-600' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-500 to-teal-600' : 'from-emerald-400 via-teal-500 to-green-600'} rounded-full mt-4 animate-pulse"></div>
+
+          {/* Grid Pattern */}
+          <div className="absolute inset-0 opacity-5" style={{
+            backgroundImage: `
+             linear-gradient(rgba(0, 255, 255, 0.3) 1px, transparent 1px),
+             linear-gradient(90deg, rgba(0, 255, 255, 0.3) 1px, transparent 1px)
+           `,
+            backgroundSize: '40px 40px'
+          }}></div>
         </div>
 
-        {error && (
-          <div className="mb-6 p-3 bg-red-500/20 border border-red-400/30 rounded-lg flex items-center space-x-2">
-            <AlertCircle className="w-5 h-5 text-red-400" />
-            <span className="text-red-400 text-sm">{error}</span>
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div>
-            <label className={`block text-sm font-medium mb-2 ${loginType === 'admin' ? 'text-purple-300' : loginType === 'supervisor' ? 'text-blue-300' : 'text-emerald-300'}`}>Username</label>
-            <input
-              type="text"
-              value={formData.username}
-              onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-              className={`w-full px-4 py-3 bg-gray-800/50 border border-${loginType === 'admin' ? 'purple-500/30' : loginType === 'supervisor' ? 'blue-500/30' : 'emerald-500/30'} rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-${loginType === 'admin' ? 'purple-400' : loginType === 'supervisor' ? 'blue-400' : 'emerald-400'} focus:ring-2 focus:ring-${loginType === 'admin' ? 'purple-400/20' : loginType === 'supervisor' ? 'blue-400/20' : 'emerald-400/20'} transition-all transform focus:scale-105`}
-              placeholder={loginType === 'admin' ? (isSignUp ? 'Choose a username' : 'Enter admin username') : `Enter ${loginType} username`}
-              required
-            />
-          </div>
-
-          {/* Email field only for admin signup */}
-          {isSignUp && loginType === 'admin' && (
-            <div>
-              <label className="block text-sm font-medium text-purple-300 mb-2">Email Address *</label>
-              <input
-                type="email"
-                value={formData.email}
-                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                className="w-full px-4 py-3 bg-gray-800/50 border border-purple-500/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all transform focus:scale-105"
-                placeholder="Enter your email address"
-                required
-              />
+        <div className="w-full max-w-md mx-4 relative z-10">
+          {/* Logo */}
+          <div className="text-center mb-8">
+            <div className="w-20 h-20 mx-auto mb-4 rounded-xl bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center animate-pulse" style={{
+              boxShadow: '0 0 30px rgba(0, 255, 255, 0.4)'
+            }}>
+              <Building className="w-10 h-10 text-white" />
             </div>
-          )}
-
-          <div>
-            <label className={`block text-sm font-medium mb-2 ${loginType === 'admin' ? 'text-purple-300' : loginType === 'supervisor' ? 'text-blue-300' : 'text-emerald-300'}`}>Password</label>
-            <input
-              type="password"
-              value={formData.password}
-              onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-              className={`w-full px-4 py-3 bg-gray-800/50 border border-${loginType === 'admin' ? 'purple-500/30' : loginType === 'supervisor' ? 'blue-500/30' : 'emerald-500/30'} rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-${loginType === 'admin' ? 'purple-400' : loginType === 'supervisor' ? 'blue-400' : 'emerald-400'} focus:ring-2 focus:ring-${loginType === 'admin' ? 'purple-400/20' : loginType === 'supervisor' ? 'blue-400/20' : 'emerald-400/20'} transition-all transform focus:scale-105`}
-              placeholder={loginType === 'admin' ? (isSignUp ? 'Create a password (min 6 chars)' : 'Enter admin password') : `Enter ${loginType} password`}
-              required
-            />
+            <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 mb-2">
+              ELPRO IoT Control
+            </h1>
+            <p className="text-gray-400">Multi-Tenant Secure Access Portal</p>
+            {isSignUp && loginType === 'admin' && (
+              <p className="text-cyan-400 text-sm mt-2">Create your own isolated organization environment</p>
+            )}
           </div>
 
-          {/* Confirm password only for admin signup */}
-          {isSignUp && loginType === 'admin' && (
-            <div>
-              <label className="block text-sm font-medium text-purple-300 mb-2">Confirm Password *</label>
-              <input
-                type="password"
-                value={formData.confirmPassword}
-                onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
-                className="w-full px-4 py-3 bg-gray-800/50 border border-purple-500/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all transform focus:scale-105"
-                placeholder="Confirm your password"
-                required
-              />
+          {/* Role Selector Tabs */}
+          <div className="mb-8">
+            <div className="flex space-x-2 p-1 bg-gray-800/50 rounded-xl border border-cyan-500/20">
+              {[
+                { id: 'admin', label: 'Admin', icon: Shield, color: 'purple' },
+                { id: 'supervisor', label: 'Supervisor', icon: Eye, color: 'blue' },
+                { id: 'guard', label: 'Guard', icon: User, color: 'green' }
+              ].map(({ id, label, icon: Icon, color }) => (
+                <button
+                  key={id}
+                  onClick={() => {
+                    setLoginType(id);
+                    setIsSignUp(false);
+                    setError('');
+                    setFormData({ username: '', email: '', password: '', confirmPassword: '' });
+                  }}
+                  className={`flex-1 flex items-center justify-center space-x-2 py-3 px-4 rounded-lg font-medium transition-all transform hover:scale-105 ${loginType === id
+                    ? color === 'purple' ? 'bg-gradient-to-r from-purple-500 to-blue-600 text-white shadow-lg'
+                      : color === 'blue' ? 'bg-gradient-to-r from-blue-500 to-cyan-600 text-white shadow-lg'
+                        : 'bg-gradient-to-r from-emerald-500 to-green-600 text-white shadow-lg'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
+                    }`}
+                >
+                  <Icon className="w-4 h-4" />
+                  <span className="text-sm">{label}</span>
+                </button>
+              ))}
             </div>
-          )}
+          </div>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className={`w-full py-3 px-4 bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-500 via-blue-600 to-cyan-600' : loginType === 'supervisor' ? 'from-blue-500 via-cyan-600 to-teal-600' : 'from-emerald-500 via-teal-600 to-green-600'} text-white font-medium rounded-lg hover:bg-gradient-to-r hover:${loginType === 'admin' ? 'from-purple-400 via-blue-500 to-cyan-500' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-500 to-teal-500' : 'from-emerald-400 via-teal-500 to-green-500'} focus:outline-none focus:ring-2 focus:ring-${loginType === 'admin' ? 'purple-400/50' : loginType === 'supervisor' ? 'blue-400/50' : 'emerald-400/50'} transition-all duration-300 transform hover:scale-105 relative overflow-hidden disabled:opacity-50 disabled:transform-none`}
-            style={{ boxShadow: `0 0 30px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.4)` }}
-          >
-            <span className="relative z-10">
-              {loading ? (
-                <>
-                  <div className="inline-block w-5 h-5 mr-2 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                  Processing...
-                </>
-              ) : (
-                <span>
-                  {loginType === 'admin'
-                    ? (isSignUp ? 'Create Account' : 'Sign In')
-                    : 'Sign In'
-                  }
-                </span>
+          {/* Login Form */}
+          <div className="bg-gray-900/80 backdrop-blur-xl border border-${loginType === 'admin' ? 'purple-500/30' : loginType === 'supervisor' ? 'blue-500/30' : 'emerald-500/30'} rounded-2xl p-8 shadow-2xl transform hover:scale-105 transition-all duration-300" style={{
+            boxShadow: `0 0 60px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.3), inset 0 0 60px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.05)`
+          }}>
+            {/* Sign Up/Sign In Toggle for Admin Only */}
+            {loginType === 'admin' && (
+              <div className="flex space-x-2 mb-6 p-1 bg-gray-800/50 rounded-lg">
+                <button
+                  onClick={() => {
+                    setIsSignUp(false);
+                    setError('');
+                    setFormData({ username: '', email: '', password: '', confirmPassword: '' });
+                  }}
+                  className={`flex-1 py-2 px-4 rounded-md font-medium transition-all ${!isSignUp ? 'bg-purple-500 text-white' : 'text-gray-400 hover:text-white'}`}
+                >
+                  Sign In
+                </button>
+                <button
+                  onClick={() => {
+                    setIsSignUp(true);
+                    setError('');
+                    setFormData({ username: '', email: '', password: '', confirmPassword: '' });
+                  }}
+                  className={`flex-1 py-2 px-4 rounded-md font-medium transition-all ${isSignUp ? 'bg-purple-500 text-white' : 'text-gray-400 hover:text-white'}`}
+                >
+                  Create Organization
+                </button>
+              </div>
+            )}
+            <div className="text-center mb-8">
+              <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-400 via-blue-500 to-cyan-600' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-500 to-teal-600' : 'from-emerald-400 via-teal-500 to-green-600'} flex items-center justify-center relative animate-pulse" style={{
+                boxShadow: `0 0 40px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.5)`
+              }}>
+                {loginType === 'admin' ? <Shield className="w-10 h-10 text-white" /> : loginType === 'supervisor' ? <Eye className="w-10 h-10 text-white" /> : <User className="w-10 h-10 text-white" />}
+                <div className="absolute inset-0 rounded-full border border-${loginType === 'admin' ? 'purple-400/50' : loginType === 'supervisor' ? 'blue-400/50' : 'emerald-400/50'} animate-spin" style={{ animationDuration: '3s' }}></div>
+                <div className="absolute inset-2 rounded-full border border-${loginType === 'admin' ? 'blue-400/30' : loginType === 'supervisor' ? 'cyan-400/30' : 'teal-400/30'} animate-spin" style={{ animationDuration: '2s', animationDirection: 'reverse' }}></div>
+              </div>
+              <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-400 via-blue-400 to-cyan-400' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-400 to-teal-400' : 'from-emerald-400 via-teal-400 to-green-400'} animate-pulse">
+                {loginType === 'admin' ? 'Administrator' : loginType === 'supervisor' ? 'Supervisor' : 'Security Guard'}
+              </h1>
+              <p className="text-gray-400 text-sm mt-2">
+                {loginType === 'admin' ? (isSignUp ? 'Create Admin Account' : 'Full System Control') : loginType === 'supervisor' ? 'Management Control' : 'Operational Access'}
+              </p>
+              <div className="w-full h-1 bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-400 via-blue-500 to-cyan-600' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-500 to-teal-600' : 'from-emerald-400 via-teal-500 to-green-600'} rounded-full mt-4 animate-pulse"></div>
+            </div>
+            {error && (
+              <div className="mb-6 p-3 bg-red-500/20 border border-red-400/30 rounded-lg flex items-center space-x-2">
+                <AlertCircle className="w-5 h-5 text-red-400" />
+                <span className="text-red-400 text-sm">{error}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="space-y-6">
+              <div>
+                <label className={`block text-sm font-medium mb-2 ${loginType === 'admin' ? 'text-purple-300' : loginType === 'supervisor' ? 'text-blue-300' : 'text-emerald-300'}`}>Username</label>
+                <input
+                  type="text"
+                  value={formData.username}
+                  onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                  className={`w-full px-4 py-3 bg-gray-800/50 border border-${loginType === 'admin' ? 'purple-500/30' : loginType === 'supervisor' ? 'blue-500/30' : 'emerald-500/30'} rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-${loginType === 'admin' ? 'purple-400' : loginType === 'supervisor' ? 'blue-400' : 'emerald-400'} focus:ring-2 focus:ring-${loginType === 'admin' ? 'purple-400/20' : loginType === 'supervisor' ? 'blue-400/20' : 'emerald-400/20'} transition-all transform focus:scale-105`}
+                  placeholder={loginType === 'admin' ? (isSignUp ? 'Choose a username' : 'Enter admin username') : `Enter ${loginType} username`}
+                  required
+                />
+              </div>
+
+              {/* Email field only for admin signup */}
+              {isSignUp && loginType === 'admin' && (
+                <div>
+                  <label className="block text-sm font-medium text-purple-300 mb-2">Email Address *</label>
+                  <input
+                    type="email"
+                    value={formData.email}
+                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                    className="w-full px-4 py-3 bg-gray-800/50 border border-purple-500/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all transform focus:scale-105"
+                    placeholder="Enter your organization email address"
+                    required
+                  />
+                </div>
               )}
-            </span>
-            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent transform -skew-x-12 translate-x-full hover:translate-x-[-200%] transition-transform duration-700"></div>
-          </button>
-        </form>
 
-        {/* Info message for non-admin users */}
-        {loginType !== 'admin' && (
-          <div className="mt-6 p-4 bg-blue-500/10 border border-blue-400/30 rounded-lg">
-            <div className="flex items-center space-x-2">
-              <Info className="w-4 h-4 text-blue-400" />
-              <span className="text-blue-400 text-sm">
-                {loginType.charAt(0).toUpperCase() + loginType.slice(1)} accounts are created by administrators.
-              </span>
-            </div>
+              <div>
+                <label className={`block text-sm font-medium mb-2 ${loginType === 'admin' ? 'text-purple-300' : loginType === 'supervisor' ? 'text-blue-300' : 'text-emerald-300'}`}>Password</label>
+                <input
+                  type="password"
+                  value={formData.password}
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                  className={`w-full px-4 py-3 bg-gray-800/50 border border-${loginType === 'admin' ? 'purple-500/30' : loginType === 'supervisor' ? 'blue-500/30' : 'emerald-500/30'} rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-${loginType === 'admin' ? 'purple-400' : loginType === 'supervisor' ? 'blue-400' : 'emerald-400'} focus:ring-2 focus:ring-${loginType === 'admin' ? 'purple-400/20' : loginType === 'supervisor' ? 'blue-400/20' : 'emerald-400/20'} transition-all transform focus:scale-105`}
+                  placeholder={loginType === 'admin' ? (isSignUp ? 'Create a password (min 6 chars)' : 'Enter admin password') : `Enter ${loginType} password`}
+                  required
+                />
+              </div>
+
+              {/* Confirm password only for admin signup */}
+              {isSignUp && loginType === 'admin' && (
+                <div>
+                  <label className="block text-sm font-medium text-purple-300 mb-2">Confirm Password *</label>
+                  <input
+                    type="password"
+                    value={formData.confirmPassword}
+                    onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+                    className="w-full px-4 py-3 bg-gray-800/50 border border-purple-500/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all transform focus:scale-105"
+                    placeholder="Confirm your organization password"
+                    required
+                  />
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={loading}
+                className={`w-full py-3 px-4 bg-gradient-to-r ${loginType === 'admin' ? 'from-purple-500 via-blue-600 to-cyan-600' : loginType === 'supervisor' ? 'from-blue-500 via-cyan-600 to-teal-600' : 'from-emerald-500 via-teal-600 to-green-600'} text-white font-medium rounded-lg hover:bg-gradient-to-r hover:${loginType === 'admin' ? 'from-purple-400 via-blue-500 to-cyan-500' : loginType === 'supervisor' ? 'from-blue-400 via-cyan-500 to-teal-500' : 'from-emerald-400 via-teal-500 to-green-500'} focus:outline-none focus:ring-2 focus:ring-${loginType === 'admin' ? 'purple-400/50' : loginType === 'supervisor' ? 'blue-400/50' : 'emerald-400/50'} transition-all duration-300 transform hover:scale-105 relative overflow-hidden disabled:opacity-50 disabled:transform-none`}
+                style={{ boxShadow: `0 0 30px rgba(${loginType === 'admin' ? '147, 51, 234' : loginType === 'supervisor' ? '59, 130, 246' : '16, 185, 129'}, 0.4)` }}
+              >
+                <span className="relative z-10">
+                  {loading ? (
+                    <>
+                      <div className="inline-block w-5 h-5 mr-2 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      Processing...
+                    </>
+                  ) : (
+                    <span>
+                      {loginType === 'admin'
+                        ? (isSignUp ? 'Create Organization' : 'Sign In to Organization')
+                        : 'Sign In'
+                      }
+                    </span>
+                  )}
+                </span>
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent transform -skew-x-12 translate-x-full hover:translate-x-[-200%] transition-transform duration-700"></div>
+              </button>
+            </form>
+
+            {/* Info message for different scenarios */}
+            {isSignUp && loginType === 'admin' && (
+              <div className="mt-6 p-4 bg-blue-500/10 border border-blue-400/30 rounded-lg">
+                <div className="flex items-center space-x-2">
+                  <Building className="w-4 h-4 text-blue-400" />
+                  <span className="text-blue-400 text-sm">
+                    Creating a new organization will give you your own isolated environment with separate users, devices, and data.
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {loginType !== 'admin' && (
+              <div className="mt-6 p-4 bg-blue-500/10 border border-blue-400/30 rounded-lg">
+                <div className="flex items-center space-x-2">
+                  <Info className="w-4 h-4 text-blue-400" />
+                  <span className="text-blue-400 text-sm">
+                    {loginType.charAt(0).toUpperCase() + loginType.slice(1)} accounts are created by organization administrators.
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
-    </div>
-  </div>
-);
-};
+    );
+  };
 
   // Navigation menu items based on role
   const getMenuItems = () => {
@@ -1894,17 +1938,9 @@ return (
   }, [groups, updateDevice]);
 
   // Sidebar Component
+  // Sidebar Component - FIXED VERSION
   const Sidebar = () => {
-    const roleLogos = {
-      admin: localStorage.getItem('adminLogo'),
-      supervisor: localStorage.getItem('supervisorLogo'),
-      guard: localStorage.getItem('guardLogo')
-    };
-
-    const currentRoleLogo = roleLogos[currentUser?.role];
-
     return (
-
       <>
         {isMobile && mobileMenuOpen && (
           <div
@@ -1914,10 +1950,10 @@ return (
         )}
 
         <div className={`
-       ${isMobile ? 'fixed' : 'relative'} 
-       ${isMobile && !mobileMenuOpen ? '-translate-x-full' : 'translate-x-0'}
-       w-64 h-full bg-gray-900/95 backdrop-blur-xl border-r border-cyan-500/20 flex flex-col z-50 transition-transform duration-300
-     `} style={{
+        ${isMobile ? 'fixed' : 'relative'} 
+        ${isMobile && !mobileMenuOpen ? '-translate-x-full' : 'translate-x-0'}
+        w-64 h-full bg-gray-900/95 backdrop-blur-xl border-r border-cyan-500/20 flex flex-col z-50 transition-transform duration-300
+      `} style={{
             background: 'linear-gradient(180deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)',
             boxShadow: '0 0 30px rgba(0, 255, 255, 0.1)'
           }}>
@@ -1927,17 +1963,18 @@ return (
               <div className="w-12 h-12 rounded-lg bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center animate-pulse" style={{
                 boxShadow: '0 0 25px rgba(0, 255, 255, 0.4)'
               }}>
-                <Shield className="w-7 h-7 text-white" />
+                <img src="/logo512.png" alt="ELPRO Logo" className="w-10 h-10 rounded-lg object-cover" />
               </div>
 
               <div>
                 <h2 className="text-xl font-bold text-white">ELPRO</h2>
-                <p className="text-xs text-cyan-300">IoT Control</p>
+                <p className="text-xs text-cyan-300">
+                  {currentTenant?.tenantName || 'IoT Control'}
+                </p>
               </div>
             </div>
           </div>
 
-          {/* Connection Status */}
           {/* Connection Status */}
           <div className="px-6 py-3 border-b border-cyan-500/20">
             <div className={`flex items-center space-x-2 px-3 py-2 rounded-lg ${connectionStatus === 'connected' ? 'bg-emerald-500/20 border border-emerald-400/30' :
@@ -1986,35 +2023,51 @@ return (
             </div>
           </nav>
 
-          {/* User Info */}
-          {/* User Info */}
+          {/* User Info with Tenant Context */}
           <div className="p-4 border-t border-cyan-500/20">
             <div className="flex items-center space-x-3 p-3 rounded-lg bg-gray-800/30 border border-cyan-500/20">
               <div className="w-12 h-12 flex items-center justify-center">
-                {localStorage.getItem('adminLogo') ? (
+                {currentTenant?.logoUrl ? (
                   <img
-                    src={localStorage.getItem('adminLogo')}
-                    alt="System logo"
-                    className="w-10 h-10 object-cover rounded-lg"
-                    key={logoVersion}
+                    src={currentTenant.logoUrl}
+                    alt="Organization Logo"
+                    className="w-10 h-10 rounded-lg object-cover"
+                    onError={(e) => {
+                      // Fallback to user initial if logo fails
+                      e.target.style.display = 'none';
+                      e.target.nextSibling.style.display = 'flex';
+                    }}
                   />
-                ) : (
-                  <div className="w-10 h-10 rounded-lg bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center">
-                    <Shield className="w-6 h-6 text-white" />
-                  </div>
-                )}
+                ) : null}
+                <div
+                  className="w-10 h-10 rounded-lg bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center text-white font-bold"
+                  style={{
+                    display: currentTenant?.logoUrl ? 'none' : 'flex'
+                  }}
+                >
+                  {currentUser?.username?.charAt(0).toUpperCase() || 'U'}
+                </div>
               </div>
 
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-white truncate">{currentUser?.username}</p>
                 <p className="text-xs text-cyan-300 capitalize">{currentUser?.role}</p>
+                {currentTenant && (
+                  <p className="text-xs text-gray-400 truncate">
+                    {currentTenant.tenantName?.length > 20 ?
+                      currentTenant.tenantName.substring(0, 20) + '...' :
+                      currentTenant.tenantName
+                    }
+                  </p>
+                )}
               </div>
               <button
-              onClick={() => {
-          setCurrentUser(null); // Clear current user
-          setActiveTab(''); // Reset activeTab on logout
-          cognitoService.signOut(); // Perform Cognito sign-out
-        }}
+                onClick={() => {
+                  setCurrentUser(null);
+                  setCurrentTenant(null);
+                  setActiveTab('');
+                  cognitoService.signOut();
+                }}
                 className="p-1 rounded hover:bg-red-500/20 text-red-400 transition-colors transform hover:scale-110"
                 title="Logout"
               >
@@ -2042,16 +2095,7 @@ return (
             <p className="text-gray-400">Real-time monitoring and control dashboard</p>
             <div className="absolute -top-2 -left-2 w-20 h-1 bg-gradient-to-r from-cyan-400 to-blue-500 rounded-full animate-pulse"></div>
           </div>
-          <div className="mt-4 md:mt-0">
-            <div className="text-right bg-gray-900/50 backdrop-blur-sm border border-cyan-500/20 rounded-lg p-4">
-              <p className="text-sm text-gray-400">Last updated</p>
-              <p className="text-cyan-300 font-medium">
-                {lastUpdate ? lastUpdate.toLocaleTimeString() : 'Never'}
-              </p>
-              <div className={`w-2 h-2 rounded-full mt-2 ml-auto ${connectionStatus === 'connected' ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'
-                }`}></div>
-            </div>
-          </div>
+
         </div>
 
         {/* Stats Cards - Reduced size */}
@@ -2340,6 +2384,7 @@ return (
   };
 
   // Assets Page Component
+  // Assets Page Component - WITH DEBUG INFO
   const AssetsPage = () => {
     const filteredDevices = devices.filter(device =>
       selectedGroup === 'all' || device.group === selectedGroup
@@ -2348,6 +2393,15 @@ return (
       device.location.toLowerCase().includes(searchTerm.toLowerCase())
     );
 
+    // Add debug logging:
+    console.log('🔍 AssetsPage Debug Info:');
+    console.log('   - Current user role:', currentUser?.role);
+    console.log('   - Current tenant ID:', currentTenant?.tenantId);
+    console.log('   - Total devices:', devices.length);
+    console.log('   - Filtered devices:', filteredDevices.length);
+    console.log('   - Devices array:', devices);
+    console.log('   - Real-time service tenant:', realTimeService.currentTenantId);
+
     return (
       <div className="space-y-6">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between">
@@ -2355,15 +2409,27 @@ return (
             <h1 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 mb-2">
               Asset Management
             </h1>
-            <p className="text-gray-400">Register and manage AWS IoT devices</p>
+            <p className="text-gray-400">
+              {currentUser?.role === 'admin' ? 'Register and manage AWS IoT devices' :
+                `View and monitor devices registered by your organization admin`}
+            </p>
+            {/* DEBUG INFO */}
+            <div className="mt-2 p-2 bg-blue-500/10 border border-blue-400/30 rounded text-xs">
+              <p className="text-blue-400">
+                Debug: Role={currentUser?.role}, Tenant={currentTenant?.tenantId}, Devices={devices.length}
+              </p>
+            </div>
           </div>
-          <button
-            onClick={() => setShowAddDeviceModal(true)}
-            className="mt-4 md:mt-0 px-6 py-3 bg-gradient-to-r from-cyan-500 via-blue-600 to-purple-600 text-white font-medium rounded-lg hover:from-cyan-400 hover:via-blue-500 hover:to-purple-500 transition-all duration-300 flex items-center space-x-2"
-          >
-            <Plus className="w-5 h-5" />
-            <span>Register Device</span>
-          </button>
+          {/* Only show register button for admins */}
+          {currentUser?.role === 'admin' && (
+            <button
+              onClick={() => setShowAddDeviceModal(true)}
+              className="mt-4 md:mt-0 px-6 py-3 bg-gradient-to-r from-cyan-500 via-blue-600 to-purple-600 text-white font-medium rounded-lg hover:from-cyan-400 hover:via-blue-500 hover:to-purple-500 transition-all duration-300 flex items-center space-x-2"
+            >
+              <Plus className="w-5 h-5" />
+              <span>Register Device</span>
+            </button>
+          )}
         </div>
 
         {/* Filters */}
@@ -2395,15 +2461,24 @@ return (
           {devices.length === 0 ? (
             <div className="text-center text-gray-500 py-12">
               <Database className="w-16 h-16 mx-auto mb-4 opacity-50" />
-              <h3 className="text-xl font-semibold mb-2">No Devices Registered</h3>
-              <p className="text-sm mb-6">Register your first AWS IoT Thing to get started</p>
-              <button
-                onClick={() => setShowAddDeviceModal(true)}
-                className="px-6 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-medium rounded-lg hover:from-cyan-400 hover:to-blue-500 transition-all duration-300 flex items-center space-x-2 mx-auto"
-              >
-                <Plus className="w-5 h-5" />
-                <span>Register First Device</span>
-              </button>
+              <h3 className="text-xl font-semibold mb-2">
+                {currentUser?.role === 'admin' ? 'No Devices Registered' : 'No Devices Available'}
+              </h3>
+              <p className="text-sm mb-6">
+                {currentUser?.role === 'admin' ?
+                  'Register your first AWS IoT Thing to get started' :
+                  'Your organization admin hasn\'t registered any devices yet'
+                }
+              </p>
+              {currentUser?.role === 'admin' && (
+                <button
+                  onClick={() => setShowAddDeviceModal(true)}
+                  className="px-6 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-medium rounded-lg hover:from-cyan-400 hover:to-blue-500 transition-all duration-300 flex items-center space-x-2 mx-auto"
+                >
+                  <Plus className="w-5 h-5" />
+                  <span>Register First Device</span>
+                </button>
+              )}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -2414,7 +2489,10 @@ return (
                     <th className="px-6 py-4 text-left text-sm font-semibold text-cyan-300">Location</th>
                     <th className="px-6 py-4 text-left text-sm font-semibold text-cyan-300">Status</th>
                     <th className="px-6 py-4 text-left text-sm font-semibold text-cyan-300">Features</th>
-                    <th className="px-6 py-4 text-left text-sm font-semibold text-cyan-300">Actions</th>
+                    {/* Only show actions for admins */}
+                    {currentUser?.role === 'admin' && (
+                      <th className="px-6 py-4 text-left text-sm font-semibold text-cyan-300">Actions</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-700/50">
@@ -2426,12 +2504,12 @@ return (
                       <tr
                         key={device.id}
                         className={`
-                        transition-colors group/row
-                        ${hasActiveFeatures
+                       transition-colors group/row
+                       ${hasActiveFeatures
                             ? 'hover:bg-cyan-900/10 bg-gray-800/20'
                             : 'hover:bg-gray-800/30'
                           }
-                      `}
+                     `}
                       >
                         <td className="px-6 py-4">
                           <div className="flex items-center space-x-3">
@@ -2490,12 +2568,12 @@ return (
                                 <span
                                   key={feature}
                                   className={`
-                                  inline-flex items-center px-2 py-1 text-xs font-medium rounded border transition-all duration-300
-                                  ${enabled
+                                 inline-flex items-center px-2 py-1 text-xs font-medium rounded border transition-all duration-300
+                                 ${enabled
                                       ? 'shadow-sm animate-pulse'
                                       : 'opacity-40 border-dashed'
                                     }
-                                `}
+                               `}
                                   style={{
                                     backgroundColor: enabled ? color + '20' : 'rgba(100, 116, 139, 0.1)',
                                     color: enabled ? color : '#64748b',
@@ -2513,34 +2591,36 @@ return (
                                 </span>
                               );
                             })}
-
                           </div>
                         </td>
-                        <td className="px-6 py-4">
-                          <div className="flex space-x-2">
-                            <button
-                              onClick={() => requestDeviceStatus(device.id)}
-                              disabled={device.status === 'offline'}
-                              className={`
-                              p-2 rounded-lg transition-all transform hover:scale-110
-                              ${device.status === 'offline'
-                                  ? 'text-gray-500 cursor-not-allowed opacity-50'
-                                  : 'text-blue-400 hover:text-blue-300 hover:bg-blue-500/20'
-                                }
-                            `}
-                              title="Request Status"
-                            >
-                              <Activity className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={() => removeDevice(device.id)}
-                              className="p-2 text-red-400 hover:text-red-300 hover:bg-red-500/20 rounded-lg transition-all transform hover:scale-110"
-                              title="Unregister Device"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-                        </td>
+                        {/* Actions only for admin */}
+                        {currentUser?.role === 'admin' && (
+                          <td className="px-6 py-4">
+                            <div className="flex space-x-2">
+                              <button
+                                onClick={() => requestDeviceStatus(device.id)}
+                                disabled={device.status === 'offline'}
+                                className={`
+                             p-2 rounded-lg transition-all transform hover:scale-110
+                             ${device.status === 'offline'
+                                    ? 'text-gray-500 cursor-not-allowed opacity-50'
+                                    : 'text-blue-400 hover:text-blue-300 hover:bg-blue-500/20'
+                                  }
+                           `}
+                                title="Request Status"
+                              >
+                                <Activity className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => removeDevice(device.id)}
+                                className="p-2 text-red-400 hover:text-red-300 hover:bg-red-500/20 rounded-lg transition-all transform hover:scale-110"
+                                title="Unregister Device"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
@@ -2550,7 +2630,8 @@ return (
           )}
         </div>
 
-        {showAddDeviceModal && <AddDeviceModal />}
+        {/* Only show add device modal for admins */}
+        {currentUser?.role === 'admin' && showAddDeviceModal && <AddDeviceModal />}
       </div>
     );
   };
@@ -4164,102 +4245,55 @@ return (
           </div>
         </div>
 
-        {/* System Performance Metrics */}
-        <div className="relative group">
-          <div className="absolute inset-0 bg-gradient-to-r from-cyan-600/20 via-purple-600/20 to-pink-600/20 rounded-3xl blur-xl"></div>
-          <div className="relative bg-gray-900/70 backdrop-blur-2xl border border-cyan-500/30 rounded-3xl p-8 hover:border-cyan-400/50 transition-all duration-500" style={{
-            boxShadow: '0 0 80px rgba(6, 182, 212, 0.3), inset 0 0 80px rgba(6, 182, 212, 0.05)'
-          }}>
-            <h3 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-purple-500 to-pink-500 mb-8 group-hover:from-pink-500 group-hover:via-cyan-400 group-hover:to-purple-500 transition-all duration-500 flex items-center">
-              <Cpu className="w-8 h-8 mr-4 text-cyan-400 group-hover:animate-spin" />
-              System Performance Metrics
-            </h3>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              {[
-                {
-                  label: 'Connection Status',
-                  value: connectionStatus === 'connected' ? 'Connected' : 'Disconnected',
-                  subtext: connectionStatus === 'connected' ? 'AWS IoT Core' : 'Check connection',
-                  color: connectionStatus === 'connected' ? 'emerald' : 'red'
-                },
-                {
-                  label: 'Response Time',
-                  value: connectionStatus === 'connected' ? '1.2s' : 'N/A',
-                  subtext: connectionStatus === 'connected' ? 'Average' : 'Unavailable',
-                  color: connectionStatus === 'connected' ? 'blue' : 'gray'
-                },
-                {
-                  label: 'Data Points',
-                  value: statusHistory.length,
-                  subtext: 'Total events logged',
-                  color: 'purple'
-                },
-                {
-                  label: 'Last Update',
-                  value: lastUpdate ? lastUpdate.toLocaleTimeString() : 'Never',
-                  subtext: 'Latest sync',
-                  color: lastUpdate ? 'cyan' : 'gray'
-                }
-              ].map((metric, index) => (
-                <div key={index} className="text-center p-4 bg-gray-800/30 rounded-lg border border-gray-700/50 hover:border-cyan-500/30 transition-all group/metric transform hover:scale-105">
-                  <div className={`text-2xl font-bold mb-2 ${metric.color === 'emerald' ? 'text-emerald-400' :
-                    metric.color === 'red' ? 'text-red-400' :
-                      metric.color === 'blue' ? 'text-blue-400' :
-                        metric.color === 'purple' ? 'text-purple-400' :
-                          metric.color === 'cyan' ? 'text-cyan-400' :
-                            'text-gray-400'
-                    } group-hover/metric:text-cyan-300 transition-colors`}>
-                    {metric.value}
-                  </div>
-                  <div className="text-gray-400 text-sm font-medium">{metric.label}</div>
-                  <div className="text-gray-500 text-xs mt-1">{metric.subtext}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
+
       </div>
     );
   };
 
   // Users Page
   const UsersPage = () => {
-
     const [users, setUsers] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showAddUserModal, setShowAddUserModal] = useState(false);
     const [showEditUserModal, setShowEditUserModal] = useState(false);
     const [editingUser, setEditingUser] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
-    const [logoVersion, setLogoVersion] = useState(0);
 
-    useEffect(() => {
-      const handleStorageChange = () => {
-        setLogoVersion(prev => prev + 1);
-      };
-
-      window.addEventListener('storage', handleStorageChange);
-      return () => window.removeEventListener('storage', handleStorageChange);
-    }, []);
     // Load users on component mount
     useEffect(() => {
       loadUsers();
-    }, []);
+    }, [currentTenant]);
 
     const loadUsers = async () => {
+      if (!currentTenant?.tenantId) {
+        console.warn('⚠️ No tenant context for loading users');
+        setLoading(false);
+        return;
+      }
+
       setLoading(true);
       try {
-        const result = await cognitoService.listUsers(); // Changed from getAllUsers to listUsers
+        console.log('👥 Loading users for tenant:', currentTenant.tenantId);
+        console.log('👤 Passing currentUser to service:', currentUser);
+
+        // Pass currentUser to the service method
+        const result = await cognitoService.listUsers(currentUser);
+
         if (result.success) {
+          console.log('✅ Users loaded:', result.users.length);
+          console.log('👤 Admin user received:', result.users[0]);
           setUsers(result.users);
+        } else {
+          console.error('❌ Failed to load users:', result.error);
+          setUsers([]);
         }
       } catch (error) {
-        console.error('Failed to load users:', error);
+        console.error('❌ Error loading users:', error);
+        setUsers([]);
       } finally {
         setLoading(false);
       }
     };
-
 
     const EditUserModal = () => {
       const [userData, setUserData] = useState({
@@ -4267,9 +4301,44 @@ return (
         email: editingUser?.email || '',
         role: editingUser?.role || 'supervisor',
         phone: editingUser?.attributes?.phone_number || '',
+        newPassword: '',
+        confirmPassword: ''
       });
       const [updating, setUpdating] = useState(false);
       const [error, setError] = useState('');
+      const [showPasswordSection, setShowPasswordSection] = useState(false);
+
+      // FIXED: Add phone validation
+      const validatePhoneNumber = (phone) => {
+        if (!phone || phone.trim() === '') {
+          return { valid: true, message: '' }; // Empty is valid
+        }
+
+        const cleaned = phone.replace(/\D/g, '');
+
+        // Check for valid Indian mobile number
+        if (cleaned.length === 10 && cleaned.match(/^[6-9]/)) {
+          return { valid: true, message: '' };
+        }
+
+        // Check for +91 format
+        if (phone.startsWith('+91')) {
+          const phoneDigits = phone.substring(3).replace(/\D/g, '');
+          if (phoneDigits.length === 10 && phoneDigits.match(/^[6-9]/)) {
+            return { valid: true, message: '' };
+          }
+        }
+
+        // Check for other international formats
+        if (phone.startsWith('+') && phone.length >= 10) {
+          return { valid: true, message: '' };
+        }
+
+        return {
+          valid: false,
+          message: 'Please enter a valid phone number (10 digits starting with 6-9 or +91xxxxxxxxxx)'
+        };
+      };
 
       const handleUpdateUser = async (e) => {
         e.preventDefault();
@@ -4277,20 +4346,90 @@ return (
         setError('');
 
         try {
-          // For real AWS implementation, you'd use AWS SDK here
-          // For now, update local state
-          setUsers(prevUsers =>
-            prevUsers.map(user =>
-              user.username === editingUser.username
-                ? { ...user, ...userData, attributes: { ...user.attributes, phone_number: userData.phone } }
-                : user
-            )
-          );
+          // FIXED: Validate phone before submitting
+          const phoneValidation = validatePhoneNumber(userData.phone);
+          if (!phoneValidation.valid) {
+            setError(phoneValidation.message);
+            setUpdating(false);
+            return;
+          }
 
-          setShowEditUserModal(false);
-          setEditingUser(null);
-          alert('User updated successfully');
+          // Validate passwords if changing
+          if (showPasswordSection) {
+            if (userData.newPassword !== userData.confirmPassword) {
+              setError('Passwords do not match');
+              setUpdating(false);
+              return;
+            }
+            if (userData.newPassword.length < 8) {
+              setError('Password must be at least 8 characters long');
+              setUpdating(false);
+              return;
+            }
+            if (!/(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(userData.newPassword)) {
+              setError('Password must contain uppercase, lowercase, and number');
+              setUpdating(false);
+              return;
+            }
+          }
+
+          // Update user attributes via Cognito service
+          const attributesToUpdate = {
+            'custom:role': userData.role
+          };
+
+          // Only include phone if it's provided and valid
+          if (userData.phone && userData.phone.trim() !== '') {
+            attributesToUpdate.phone_number = userData.phone.trim();
+          }
+
+          const result = await cognitoService.updateUserAttributes(editingUser.username, attributesToUpdate);
+
+          if (result.success) {
+            // If password change requested, update password
+            if (showPasswordSection && userData.newPassword) {
+              try {
+                // Use admin API to set new password
+                await cognitoIdentityServiceProvider.adminSetUserPassword({
+                  UserPoolId: AWS_CONFIG.userPoolId,
+                  Username: editingUser.username,
+                  Password: userData.newPassword,
+                  Permanent: true,
+                }).promise();
+                console.log('✅ Password updated for user:', editingUser.username);
+              } catch (passwordError) {
+                console.error('❌ Password update failed:', passwordError);
+                setError('User updated but password change failed: ' + passwordError.message);
+                setUpdating(false);
+                return;
+              }
+            }
+
+            // Update local state
+            setUsers(prevUsers =>
+              prevUsers.map(user =>
+                user.username === editingUser.username
+                  ? {
+                    ...user,
+                    role: userData.role,
+                    attributes: {
+                      ...user.attributes,
+                      phone_number: userData.phone,
+                      'custom:role': userData.role
+                    }
+                  }
+                  : user
+              )
+            );
+
+            setShowEditUserModal(false);
+            setEditingUser(null);
+            alert('✅ User updated successfully' + (showPasswordSection && userData.newPassword ? ' (including password)' : ''));
+          } else {
+            setError(result.error || 'Failed to update user');
+          }
         } catch (err) {
+          console.error('❌ Update user error:', err);
           setError('Failed to update user');
         } finally {
           setUpdating(false);
@@ -4299,7 +4438,7 @@ return (
 
       return (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-gray-900/95 backdrop-blur-xl border border-cyan-500/20 rounded-xl p-6 w-full max-w-md">
+          <div className="bg-gray-900/95 backdrop-blur-xl border border-cyan-500/20 rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-xl font-semibold text-white">Edit User</h3>
               <button
@@ -4336,10 +4475,10 @@ return (
                 <input
                   type="email"
                   value={userData.email}
-                  onChange={(e) => setUserData({ ...userData, email: e.target.value })}
-                  className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400"
-                  required
+                  readOnly
+                  className="w-full px-4 py-3 bg-gray-800/30 border border-gray-600/50 rounded-lg text-gray-400 cursor-not-allowed"
                 />
+                <p className="text-xs text-gray-500 mt-1">Email is managed by AWS Cognito</p>
               </div>
 
               <div>
@@ -4352,7 +4491,7 @@ return (
                 >
                   <option value="supervisor">Supervisor</option>
                   <option value="guard">Guard</option>
-                  <option value="admin">Admin</option>
+                  {currentUser?.role === 'admin' && <option value="admin">Admin</option>}
                 </select>
               </div>
 
@@ -4361,10 +4500,58 @@ return (
                 <input
                   type="tel"
                   value={userData.phone}
-                  onChange={(e) => setUserData({ ...userData, phone: e.target.value })}
+                  onChange={(e) => {
+                    setUserData({ ...userData, phone: e.target.value });
+                    // Clear phone-related errors when user types
+                    if (error.includes('phone')) {
+                      setError('');
+                    }
+                  }}
                   className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400"
-                  placeholder="+91 98765 43210"
+                  placeholder="+91 98765 43210 or 9876543210"
                 />
+                <p className="text-xs text-gray-500 mt-1">Enter 10-digit mobile number or +91xxxxxxxxxx format</p>
+              </div>
+
+              {/* Password Change Section */}
+              <div className="border-t border-gray-700/50 pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <label className="block text-sm font-medium text-gray-300">Change Password</label>
+                  <button
+                    type="button"
+                    onClick={() => setShowPasswordSection(!showPasswordSection)}
+                    className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors"
+                  >
+                    {showPasswordSection ? 'Cancel' : 'Change Password'}
+                  </button>
+                </div>
+
+                {showPasswordSection && (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-300 mb-2">New Password</label>
+                      <input
+                        type="password"
+                        value={userData.newPassword}
+                        onChange={(e) => setUserData({ ...userData, newPassword: e.target.value })}
+                        className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400"
+                        placeholder="Enter new password"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">Min 8 chars, uppercase, lowercase, number</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-300 mb-2">Confirm New Password</label>
+                      <input
+                        type="password"
+                        value={userData.confirmPassword}
+                        onChange={(e) => setUserData({ ...userData, confirmPassword: e.target.value })}
+                        className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400"
+                        placeholder="Confirm new password"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="flex space-x-3 pt-4">
@@ -4401,31 +4588,46 @@ return (
 
     const handleDeleteUser = async (username) => {
       if (username === currentUser?.username) {
-        alert('Cannot delete your own account');
+        alert('❌ Cannot delete your own account');
         return;
       }
 
-      if (window.confirm(`Are you sure you want to delete user "${username}"?`)) {
+      if (window.confirm(`⚠️ Are you sure you want to delete user "${username}" from your organization?`)) {
         try {
+          console.log('🗑️ Deleting user from tenant:', currentTenant.tenantId, username);
           const result = await cognitoService.deleteUser(username);
+
           if (result.success) {
             setUsers(users.filter(user => user.username !== username));
+            alert('✅ User deleted successfully from your organization');
           } else {
-            alert(`Failed to delete user: ${result.error}`);
+            alert(`❌ Failed to delete user: ${result.error}`);
           }
         } catch (error) {
-          alert('Failed to delete user');
+          console.error('❌ Delete user error:', error);
+          alert('❌ Failed to delete user');
         }
       }
     };
 
     // Filter users based on search term
-    const filteredUsers = users.filter(user =>
-      user.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      user.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      user.role.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    const filteredUsers = useMemo(() => {
+      if (!Array.isArray(users)) return [];
+      if (!searchTerm || searchTerm.trim() === '') return users;
 
+      return users.filter(user => {
+        if (!user) return false;
+
+        const searchableFields = [
+          user.username || '',
+          user.email || '',
+          user.role || '',
+        ].join(' ').toLowerCase();
+
+        const searchLower = searchTerm.toLowerCase().trim();
+        return searchableFields.includes(searchLower);
+      });
+    }, [users, searchTerm]);
     // Add User Modal - For Creating Supervisor and Guard Accounts
     const AddUserModal = () => {
       const [userData, setUserData] = useState({
@@ -4433,9 +4635,8 @@ return (
         email: '',
         password: '',
         confirmPassword: '',
-        role: 'supervisor', // Default to supervisor
+        role: 'supervisor',
         phone: ''
-        // Removed department field
       });
       const [creating, setCreating] = useState(false);
       const [error, setError] = useState('');
@@ -4474,7 +4675,7 @@ return (
         setCreating(true);
         setError('');
 
-        // Validate passwords
+        // Validation
         if (userData.password !== userData.confirmPassword) {
           setError('Passwords do not match');
           setCreating(false);
@@ -4487,24 +4688,19 @@ return (
           return;
         }
 
-        // Validate phone number
-        const phoneValidation = validatePhone(userData.phone);
-        if (!phoneValidation.valid) {
-          setError('Invalid phone number. Please enter a 10-digit Indian mobile number (e.g., 9876543210) or +91xxxxxxxxxx format.');
+        if (!/(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(userData.password)) {
+          setError('Password must contain uppercase, lowercase, and number');
           setCreating(false);
           return;
         }
 
         try {
-          // Prepare attributes - only phone (department removed)
+          console.log('👤 Creating user for tenant:', currentTenant.tenantId);
+
           const attributes = {};
-
-          // Add phone only if provided
-          if (phoneValidation.formatted) {
-            attributes.phone_number = phoneValidation.formatted;
+          if (userData.phone.trim()) {
+            attributes.phone_number = userData.phone.trim();
           }
-
-          console.log('📱 Creating user with phone:', phoneValidation.formatted || 'none');
 
           const result = await cognitoService.createUserByAdmin(
             userData.username,
@@ -4515,6 +4711,7 @@ return (
           );
 
           if (result.success) {
+            console.log('✅ User created successfully:', result.user);
             setUsers([...users, result.user]);
             setShowAddUserModal(false);
             setUserData({
@@ -4525,7 +4722,7 @@ return (
               role: 'supervisor',
               phone: ''
             });
-            alert(`✅ User ${userData.username} created successfully!`);
+            alert(`✅ User ${userData.username} created successfully in your organization!`);
           } else {
             setError(result.error);
           }
@@ -4593,7 +4790,7 @@ return (
                   <option value="supervisor">Supervisor</option>
                   <option value="guard">Guard</option>
                 </select>
-                <p className="text-xs text-gray-500 mt-1">Only Supervisor and Guard accounts can be created here</p>
+                <p className="text-xs text-gray-500 mt-1">Only Supervisor and Guard accounts can be created</p>
               </div>
 
               <div>
@@ -4626,18 +4823,11 @@ return (
                 <input
                   type="tel"
                   value={userData.phone}
-                  onChange={handlePhoneChange}
+                  onChange={(e) => setUserData({ ...userData, phone: e.target.value })}
                   className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400"
                   placeholder="9876543210 or +919876543210"
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  Optional. Enter 10-digit mobile number or +91xxxxxxxxxx format
-                </p>
-                {userData.phone && (
-                  <p className="text-xs text-cyan-400 mt-1">
-                    Will be saved as: {validatePhone(userData.phone).formatted || 'Invalid format'}
-                  </p>
-                )}
+                <p className="text-xs text-gray-500 mt-1">Optional. Enter 10-digit mobile number or +91xxxxxxxxxx format</p>
               </div>
 
               <div className="flex space-x-3 pt-4">
@@ -4675,7 +4865,7 @@ return (
           <h1 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 mb-2 animate-pulse">
             User Management
           </h1>
-          <p className="text-gray-400">Manage system users and permissions</p>
+          <p className="text-gray-400">Manage users in your organization ({currentTenant?.tenantName || 'Unknown Tenant'})</p>
         </div>
 
         {/* Header Actions */}
@@ -4704,19 +4894,19 @@ return (
           )}
         </div>
 
-        {/* Users Table */}
+        {/* Users Table - rest remains the same with tenant context display */}
         <div className="bg-gray-900/60 backdrop-blur-sm border border-cyan-500/20 rounded-xl overflow-hidden">
           {loading ? (
             <div className="text-center py-12">
               <div className="w-8 h-8 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-              <p className="text-gray-400">Loading users...</p>
+              <p className="text-gray-400">Loading users for {currentTenant?.tenantName}...</p>
             </div>
           ) : filteredUsers.length === 0 ? (
             <div className="text-center text-gray-500 py-12">
               <Users className="w-16 h-16 mx-auto mb-4 opacity-50" />
               <h3 className="text-xl font-semibold mb-2">No Users Found</h3>
               <p className="text-sm mb-6">
-                {users.length === 0 ? 'No users registered yet' : 'No users match your search'}
+                {users.length === 0 ? `No users in ${currentTenant?.tenantName || 'your organization'} yet` : 'No users match your search'}
               </p>
               {currentUser?.role === 'admin' && users.length === 0 && (
                 <button
@@ -4737,7 +4927,6 @@ return (
                     <th className="px-6 py-4 text-left text-sm font-semibold text-cyan-300">Role</th>
                     <th className="px-6 py-4 text-left text-sm font-semibold text-cyan-300">Status</th>
                     <th className="px-6 py-4 text-left text-sm font-semibold text-cyan-300">Created</th>
-
                     {currentUser?.role === 'admin' && (
                       <th className="px-6 py-4 text-left text-sm font-semibold text-cyan-300">Actions</th>
                     )}
@@ -4749,46 +4938,54 @@ return (
                       <td className="px-6 py-4">
                         <div className="flex items-center space-x-3">
                           <div className="w-10 h-10 flex items-center justify-center">
-                            {localStorage.getItem('adminLogo') ? (
+                            {currentTenant?.logoUrl ? (
                               <img
-                                src={localStorage.getItem('adminLogo')}
-                                alt="System logo"
+                                src={currentTenant.logoUrl}
+                                alt="Organization logo"
                                 className="w-8 h-8 object-cover rounded-full"
-                                key={logoVersion}
                               />
                             ) : (
                               <div className="w-8 h-8 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 flex items-center justify-center text-sm font-bold text-white">
-                                {user.username.charAt(0).toUpperCase()}
+                                {user?.username?.charAt(0)?.toUpperCase() || '?'}
                               </div>
                             )}
                           </div>
                           <div>
+
                             <div className="font-medium text-white group-hover/row:text-cyan-300 transition-colors">
-                              {user.username}
+                              {user?.username || 'Unknown'}  {/* ✅ This is correct */}
                             </div>
-                            <div className="text-sm text-gray-400">{user.email}</div>
+                            <div className="text-sm text-gray-400">{user?.email || 'N/A'}</div>
                           </div>
                         </div>
                       </td>
                       <td className="px-6 py-4">
-                        <span className={`inline-flex px-3 py-1 text-xs font-medium rounded-full border ${user.role === 'admin' ? 'bg-purple-500/20 text-purple-400 border-purple-400/30' :
-                          user.role === 'supervisor' ? 'bg-blue-500/20 text-blue-400 border-blue-400/30' :
-                            'bg-green-500/20 text-green-400 border-green-400/30'
-                          }`}>
-                          {user.role.charAt(0).toUpperCase() + user.role.slice(1)}
+                        <span
+                          className={`inline-flex px-3 py-1 text-xs font-medium rounded-full border ${user?.role === 'admin'
+                            ? 'bg-purple-500/20 text-purple-400 border-purple-400/30'
+                            : user?.role === 'supervisor'
+                              ? 'bg-blue-500/20 text-blue-400 border-blue-400/30'
+                              : user?.role === 'guard'
+                                ? 'bg-green-500/20 text-green-400 border-green-400/30'
+                                : 'bg-gray-500/20 text-gray-400 border-gray-400/30'
+                            }`}
+                        >
+                          {user?.role ? user.role.charAt(0).toUpperCase() + user.role.slice(1) : 'Unknown'}
                         </span>
                       </td>
                       <td className="px-6 py-4">
-                        <span className={`inline-flex px-3 py-1 text-xs font-medium rounded-full border ${user.status === 'CONFIRMED' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-400/30' :
-                          'bg-amber-500/20 text-amber-400 border-amber-400/30'
-                          }`}>
-                          {user.status === 'CONFIRMED' ? 'Active' : 'Pending'}
+                        <span
+                          className={`inline-flex px-3 py-1 text-xs font-medium rounded-full border ${user?.status === 'CONFIRMED'
+                            ? 'bg-emerald-500/20 text-emerald-400 border-emerald-400/30'
+                            : 'bg-amber-500/20 text-amber-400 border-amber-400/30'
+                            }`}
+                        >
+                          {user?.status === 'CONFIRMED' ? 'Active' : 'Pending'}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-gray-300 text-sm">
-                        {user.createdDate ? new Date(user.createdDate).toLocaleDateString() : 'Unknown'}
+                        {user?.createdDate ? new Date(user.createdDate).toLocaleDateString() : 'Unknown'}
                       </td>
-
                       {currentUser?.role === 'admin' && (
                         <td className="px-6 py-4">
                           <div className="flex space-x-2">
@@ -4802,7 +4999,7 @@ return (
                             >
                               <Edit className="w-4 h-4" />
                             </button>
-                            {user.username !== currentUser?.username && (
+                            {user?.username !== currentUser?.username && (
                               <button
                                 onClick={() => handleDeleteUser(user.username)}
                                 className="p-2 text-red-400 hover:text-red-300 hover:bg-red-500/20 rounded-lg transition-all transform hover:scale-110"
@@ -4829,116 +5026,210 @@ return (
   };
 
   // Settings Page
-  const SettingsPage = () => {
+  const SettingsPage = ({ currentUser, currentTenant }) => {
     const [settings, setSettings] = useState({
-      systemName: 'ELPRO IoT Control System',
-      awsRegion: AWS_CONFIG.region,
-      userPoolId: AWS_CONFIG.userPoolId,
-      clientId: AWS_CONFIG.userPoolWebClientId,
-      autoRefresh: true,
-      refreshInterval: 30,
-      enableNotifications: true,
-      theme: 'dark',
-      adminLogo: localStorage.getItem('adminLogo') || null, // Single logo for all roles
+      tenantLogo: null,
     });
     const [saving, setSaving] = useState(false);
+    const [loading, setLoading] = useState(true);
     const [saved, setSaved] = useState(false);
+    const [connectionStatus, setConnectionStatus] = useState('disconnected');
+    const [pendingLogo, setPendingLogo] = useState(null); // Store logo before save
 
     // Load settings on mount
     useEffect(() => {
-      const savedSettings = localStorage.getItem('systemSettings');
-      if (savedSettings) {
-        try {
-          const parsed = JSON.parse(savedSettings);
-          setSettings(prev => ({ ...prev, ...parsed }));
-        } catch (error) {
-          console.error('Failed to load settings:', error);
-        }
+      loadSettings();
+      checkConnectionStatus();
+    }, [currentTenant]);
+
+    const loadSettings = async () => {
+      if (!currentTenant?.tenantId) {
+        setLoading(false);
+        return;
       }
-    }, []);
 
-    const handleLogoUpload = (role, event) => {
-      const file = event.target.files[0];
-      if (file) {
-        // Validate file type
-        if (!file.type.startsWith('image/')) {
-          alert('Please select an image file');
-          return;
-        }
+      try {
+        console.log('⚙️ Loading tenant settings for:', currentTenant.tenantId);
 
-        // Validate file size (max 2MB)
-        if (file.size > 2 * 1024 * 1024) {
-          alert('Image size must be less than 2MB');
-          return;
-        }
+        const tenantSettings = await cognitoService.getTenantSettings();
+        const logo = await cognitoService.getTenantLogo();
 
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const logoData = e.target.result;
-          setSettings(prev => ({ ...prev, adminLogo: logoData }));
-          localStorage.setItem('adminLogo', logoData);
+        setSettings({
+          tenantLogo: logo,
+        });
 
-          // Force re-render by triggering a state update
-          window.dispatchEvent(new Event('storage'));
-        };
-        reader.readAsDataURL(file);
+        console.log('✅ Settings loaded successfully');
+      } catch (error) {
+        console.error('❌ Failed to load settings:', error);
+      } finally {
+        setLoading(false);
       }
     };
 
-    const handleRemoveLogo = (role) => {
-      setSettings(prev => ({ ...prev, adminLogo: null }));
-      localStorage.removeItem('adminLogo');
+    const checkConnectionStatus = () => {
+      // Simulate connection status check
+      setConnectionStatus('connecting');
+      setTimeout(() => {
+        setConnectionStatus(Math.random() > 0.3 ? 'connected' : 'disconnected');
+      }, 2000);
+    };
 
-      // Force re-render by triggering a state update
-      window.dispatchEvent(new Event('storage'));
+    const handleLogoUpload = async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      // Validate file type
+      if (!file.type.startsWith('image/')) {
+        alert('Please select an image file');
+        return;
+      }
+
+      // Validate file size (max 5MB)
+      if (file.size > 5 * 1024 * 1024) {
+        alert('Image size must be less than 5MB');
+        return;
+      }
+
+      try {
+        // Convert to base64 for preview
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+          try {
+            let logoData = e.target.result;
+
+            // Compress image if it's too large
+            if (logoData.length > 400000) { // ~400KB
+              console.log('🗜️ Compressing large image...');
+              logoData = await compressImage(logoData, 600, 0.7);
+              console.log('✅ Image compressed successfully');
+            }
+
+            // Store as pending logo (don't upload yet)
+            setPendingLogo(logoData);
+            setSettings(prev => ({ ...prev, tenantLogo: logoData }));
+
+            console.log('📷 Logo selected for upload');
+          } catch (error) {
+            console.error('❌ Logo processing error:', error);
+            alert('❌ Failed to process logo: ' + error.message);
+          }
+        };
+
+        reader.readAsDataURL(file);
+      } catch (error) {
+        console.error('❌ Logo upload error:', error);
+        alert('❌ Failed to upload logo');
+      }
+    };
+
+    const handleRemoveLogo = () => {
+      if (!window.confirm('Are you sure you want to remove the organization logo?')) {
+        return;
+      }
+
+      // Remove from preview and pending
+      setPendingLogo(null);
+      setSettings(prev => ({ ...prev, tenantLogo: null }));
     };
 
     const handleSaveSettings = async () => {
+      if (!currentTenant?.tenantId) {
+        alert('❌ No tenant context available');
+        return;
+      }
+
       setSaving(true);
       try {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.log('💾 Saving tenant settings:', currentTenant.tenantId);
 
-        // Save to localStorage
-        localStorage.setItem('systemSettings', JSON.stringify(settings));
+        // Upload logo if there's a pending one
+        let logoUrl = settings.tenantLogo;
+        if (pendingLogo) {
+          console.log('📤 Uploading pending logo...');
+          const logoResult = await cognitoService.uploadTenantLogo(pendingLogo);
 
-        setSaved(true);
-        setTimeout(() => setSaved(false), 3000);
+          if (logoResult.success) {
+            logoUrl = logoResult.logoUrl;
+            console.log('✅ Logo uploaded successfully');
+          } else {
+            alert('❌ Failed to upload logo: ' + logoResult.error);
+            setSaving(false);
+            return;
+          }
+        }
+
+        // Save settings with updated logo
+        const settingsToSave = {
+          systemName: 'ELPRO', // Fixed system name
+          tenantLogo: logoUrl,
+        };
+
+        const result = await cognitoService.updateTenantSettings(settingsToSave);
+
+        if (result.success) {
+          setPendingLogo(null); // Clear pending logo
+          setSaved(true);
+          setTimeout(() => setSaved(false), 3000);
+          console.log('✅ Tenant settings saved successfully');
+
+          // Trigger storage event for other components
+          window.dispatchEvent(new Event('storage'));
+
+          // Force re-render of current user/tenant data
+          const currentUserResult = await cognitoService.getCurrentUser();
+          if (currentUserResult.success) {
+            setCurrentUser(currentUserResult.user);
+            setCurrentTenant(currentUserResult.tenant);
+          }
+        } else {
+          alert('❌ Failed to save settings: ' + result.error);
+        }
       } catch (error) {
-        console.error('Failed to save settings:', error);
-        alert('Failed to save settings');
+        console.error('❌ Failed to save tenant settings:', error);
+        alert('❌ Failed to save settings');
       } finally {
         setSaving(false);
       }
     };
 
-    const handleResetSettings = () => {
-      if (window.confirm('Are you sure you want to reset all settings to default?')) {
-        const defaultSettings = {
-          systemName: 'ELPRO IoT Control System',
-          awsRegion: AWS_CONFIG.region,
-          userPoolId: AWS_CONFIG.userPoolId,
-          clientId: AWS_CONFIG.userPoolWebClientId,
-          autoRefresh: true,
-          refreshInterval: 30,
-          enableNotifications: true,
-          theme: 'dark',
-          adminLogo: null, // Single logo
-        };
+    const handleResetSettings = async () => {
+      if (!window.confirm('Are you sure you want to reset all settings to default?')) {
+        return;
+      }
 
-        setSettings(defaultSettings);
-        localStorage.removeItem('systemSettings');
-        localStorage.removeItem('adminLogo');
+      const defaultSettings = {
+        tenantLogo: null,
+      };
+
+      setSettings(defaultSettings);
+      setPendingLogo(null);
+
+      try {
+        await cognitoService.updateTenantSettings(defaultSettings);
+        alert('✅ Settings reset to default');
+      } catch (error) {
+        console.error('❌ Failed to reset settings:', error);
+        alert('❌ Failed to reset settings');
       }
     };
+
+    if (loading) {
+      return (
+        <div className="flex items-center justify-center h-64">
+          <div className="w-8 h-8 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin mx-auto"></div>
+          <p className="text-gray-400 ml-4">Loading organization settings...</p>
+        </div>
+      );
+    }
 
     return (
       <div className="space-y-6">
         {/* Header */}
         <div className="relative">
           <h1 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 mb-2 animate-pulse">
-            System Settings
+            Organization Settings
           </h1>
-          <p className="text-gray-400">Configure system preferences and role logos</p>
+          <p className="text-gray-400">Configure settings for {currentTenant?.tenantName || 'your organization'}</p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -4953,68 +5244,65 @@ return (
                 <label className="block text-sm font-medium text-gray-300 mb-2">System Name</label>
                 <input
                   type="text"
-                  value={settings.systemName}
-                  onChange={(e) => setSettings({ ...settings, systemName: e.target.value })}
-                  className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all transform focus:scale-105"
+                  value="ELPRO"
+                  readOnly
+                  className="w-full px-4 py-3 bg-gray-800/30 border border-gray-600/50 rounded-lg text-gray-400 cursor-not-allowed"
                 />
               </div>
 
-
-
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Connection Status</label>
-                <div className={`px-4 py-3 rounded-lg border ${connectionStatus === 'connected' ? 'bg-emerald-500/20 border-emerald-400/30' :
-                  connectionStatus === 'connecting' ? 'bg-amber-500/20 border-amber-400/30' :
-                    'bg-red-500/20 border-red-400/30'
+              <div className="px-6 py-3 border-b border-cyan-500/20">
+                <div className={`flex items-center space-x-2 px-3 py-2 rounded-lg ${connectionStatus === 'connected' ? 'bg-emerald-500/20 border border-emerald-400/30' :
+                  connectionStatus === 'connecting' ? 'bg-amber-500/20 border border-amber-400/30' :
+                    'bg-red-500/20 border border-red-400/30'
                   }`}>
-                  <div className="flex items-center space-x-2">
-                    <div className={`w-2 h-2 rounded-full ${connectionStatus === 'connected' ? 'bg-emerald-400 animate-pulse' :
-                      connectionStatus === 'connecting' ? 'bg-amber-400 animate-spin' :
-                        'bg-red-400'
-                      }`}></div>
-                    <span className={`text-sm font-medium ${connectionStatus === 'connected' ? 'text-emerald-400' :
-                      connectionStatus === 'connecting' ? 'text-amber-400' :
-                        'text-red-400'
-                      }`}>
-                      {connectionStatus === 'connected' ? 'Connected to AWS IoT Core' :
-                        connectionStatus === 'connecting' ? 'Connecting to AWS IoT Core...' :
-                          'Disconnected from AWS IoT Core'}
-                    </span>
-                  </div>
+                  <div className={`w-2 h-2 rounded-full ${connectionStatus === 'connected' ? 'bg-emerald-400 animate-pulse' :
+                    connectionStatus === 'connecting' ? 'bg-amber-400 animate-spin' :
+                      'bg-red-400'
+                    }`}></div>
+                  <span className={`text-xs font-medium ${connectionStatus === 'connected' ? 'text-emerald-400' :
+                    connectionStatus === 'connecting' ? 'text-amber-400' :
+                      'text-red-400'
+                    }`}>
+                    {connectionStatus === 'connected' ? 'AWS IoT Connected' :
+                      connectionStatus === 'connecting' ? 'Connecting to AWS...' :
+                        connectionStatus === 'error' ? 'AWS Connection Error' :
+                          'AWS IoT Disconnected'}
+                  </span>
                 </div>
               </div>
             </div>
           </div>
 
-
-
-          {/* Role Logos */}
-          <div className="lg:col-span-2 bg-gray-900/60 backdrop-blur-sm border border-cyan-500/20 rounded-xl p-6 hover:border-cyan-500/30 transition-all group">
+          {/* Organization Logo */}
+          <div className="bg-gray-900/60 backdrop-blur-sm border border-cyan-500/20 rounded-xl p-6 hover:border-cyan-500/30 transition-all group">
             <h3 className="text-lg font-semibold text-white mb-4 group-hover:text-cyan-300 transition-colors flex items-center">
-              <User className="w-5 h-5 mr-2 text-cyan-400" />
-              System Logo & Branding
+              <Building className="w-5 h-5 mr-2 text-cyan-400" />
+              Organization Logo & Branding
             </h3>
-            <p className="text-gray-400 text-sm mb-6">Upload a custom logo for the system. This logo will be displayed for all user roles in the sidebar, profile, and header.</p>
+            <p className="text-gray-400 text-sm mb-6">Upload a custom logo for your organization. This logo will be displayed throughout the system.</p>
 
             <div className="flex justify-center">
               <div className="space-y-4 p-6 bg-gray-800/30 rounded-lg border border-gray-700/50 hover:border-cyan-500/30 transition-all max-w-sm">
                 <div className="text-center">
                   <h4 className="font-medium text-lg text-cyan-400">
-                    System Logo
+                    Organization Logo
                   </h4>
-                  <p className="text-xs text-gray-500">Used across all user roles</p>
+                  <p className="text-xs text-gray-500">{currentTenant?.tenantName || 'Your Organization'}</p>
+                  {pendingLogo && (
+                    <p className="text-xs text-amber-400 mt-1">⚠️ Logo selected - click Save to apply</p>
+                  )}
                 </div>
 
                 <div className="flex flex-col items-center space-y-4">
                   <div className="w-24 h-24 rounded-xl border-2 border-cyan-500/30 flex items-center justify-center bg-gray-800/50">
-                    {settings.adminLogo ? (
+                    {settings.tenantLogo ? (
                       <img
-                        src={settings.adminLogo}
-                        alt="System logo"
+                        src={settings.tenantLogo}
+                        alt="Organization logo"
                         className="w-full h-full object-cover rounded-xl"
                       />
                     ) : (
-                      <Shield className="w-12 h-12 text-cyan-400" />
+                      <Building className="w-12 h-12 text-cyan-400" />
                     )}
                   </div>
 
@@ -5022,21 +5310,21 @@ return (
                     <input
                       type="file"
                       accept="image/*"
-                      onChange={(e) => handleLogoUpload('admin', e)}
+                      onChange={handleLogoUpload}
                       className="hidden"
-                      id="admin-logo-upload"
+                      id="logo-upload"
                     />
                     <label
-                      htmlFor="admin-logo-upload"
+                      htmlFor="logo-upload"
                       className="cursor-pointer px-4 py-2 rounded-lg hover:scale-105 transition-all border text-center font-medium bg-cyan-500/20 text-cyan-400 border-cyan-400/30 hover:bg-cyan-500/30"
                     >
                       <Camera className="w-4 h-4 inline mr-2" />
-                      Upload Logo
+                      Select Logo
                     </label>
 
-                    {settings.adminLogo && (
+                    {settings.tenantLogo && (
                       <button
-                        onClick={() => handleRemoveLogo('admin')}
+                        onClick={handleRemoveLogo}
                         className="px-4 py-2 bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 transition-all border border-red-400/30 font-medium"
                       >
                         <Trash2 className="w-4 h-4 inline mr-2" />
@@ -5072,6 +5360,12 @@ return (
                 <span className="text-sm">Settings saved successfully!</span>
               </div>
             )}
+            {pendingLogo && (
+              <div className="flex items-center space-x-2 text-amber-400">
+                <AlertCircle className="w-4 h-4" />
+                <span className="text-sm">Logo changes pending - click Save to apply</span>
+              </div>
+            )}
             <button
               onClick={handleSaveSettings}
               disabled={saving}
@@ -5095,7 +5389,41 @@ return (
     );
   };
 
+  // Helper function for image compression
+  function compressImage(file, maxWidth = 800, quality = 0.8) {
+    return new Promise((resolve) => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      const img = new Image();
+
+      img.onload = () => {
+        // Calculate new dimensions
+        let { width, height } = img;
+
+        if (width > maxWidth) {
+          height = (height * maxWidth) / width;
+          width = maxWidth;
+        }
+
+        // Set canvas size
+        canvas.width = width;
+        canvas.height = height;
+
+        // Draw and compress
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Convert to base64 with compression
+        const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve(compressedDataUrl);
+      };
+
+      img.src = file;
+    });
+  }
+
   // Enhanced Profile Page with AWS User Attributes
+  // Enhanced Profile Page with AWS User Attributes - FIXED VERSION
+  // Update the ProfilePage component with better authentication checks
   const ProfilePage = () => {
     const [profileData, setProfileData] = useState({
       username: currentUser?.username || '',
@@ -5109,6 +5437,39 @@ return (
     const [changingPassword, setChangingPassword] = useState(false);
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
+    const [loading, setLoading] = useState(true);
+
+    // Load current user data on mount
+    useEffect(() => {
+      loadCurrentUserData();
+    }, [currentUser, currentTenant]);
+
+    const loadCurrentUserData = async () => {
+      if (!currentUser) {
+        setLoading(false);
+        return;
+      }
+
+      try {
+        console.log('👤 Loading current user data for tenant:', currentTenant?.tenantId);
+        console.log('👤 Current user role:', currentUser?.role);
+        console.log('👤 Current tenant logo:', currentTenant?.logoUrl ? 'Available' : 'Not available');
+
+        // FIXED: Use current user data directly since we already have it from sign-in
+        setProfileData({
+          username: currentUser.username,
+          email: currentUser.email,
+          phone: currentUser.attributes?.phone_number || '',
+          currentPassword: '',
+          newPassword: '',
+          confirmPassword: ''
+        });
+      } catch (error) {
+        console.error('❌ Failed to load user data:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
 
     const handleUpdateProfile = async (e) => {
       e.preventDefault();
@@ -5117,25 +5478,46 @@ return (
       setSuccess('');
 
       try {
-        const attributes = {
-          phone_number: profileData.phone
-        };
+        console.log('👤 Updating profile for tenant:', currentTenant?.tenantId);
+        console.log('👤 User role:', currentUser?.role);
 
-        const result = await cognitoService.updateUserAttributes(currentUser.username, attributes);
+        // FIXED: Check if cognitoService has proper authentication
+        if (!cognitoService.currentUser || !cognitoService.accessToken) {
+          console.error('❌ No authenticated session found');
+          setError('Authentication session expired. Please sign in again.');
+          setUpdating(false);
+          return;
+        }
 
-        if (result.success) {
-          setSuccess('Profile updated successfully');
-          const updatedUser = {
-            ...currentUser,
-            attributes: { ...currentUser.attributes, ...attributes }
-          };
-          setCurrentUser(updatedUser);
-          setTimeout(() => setSuccess(''), 3000);
+        const attributes = {};
+        if (profileData.phone !== currentUser?.attributes?.phone_number) {
+          attributes.phone_number = profileData.phone;
+        }
+
+        if (Object.keys(attributes).length > 0) {
+          const result = await cognitoService.updateUserAttributes(currentUser.username, attributes);
+
+          if (result.success) {
+            setSuccess('Profile updated successfully');
+
+            // Update current user in state
+            const updatedUser = {
+              ...currentUser,
+              attributes: { ...currentUser.attributes, ...attributes }
+            };
+            setCurrentUser(updatedUser);
+
+            setTimeout(() => setSuccess(''), 3000);
+          } else {
+            setError(result.error);
+          }
         } else {
-          setError(result.error);
+          setSuccess('No changes to save');
+          setTimeout(() => setSuccess(''), 3000);
         }
       } catch (err) {
-        setError('Failed to update profile');
+        console.error('❌ Profile update error:', err);
+        setError('Failed to update profile: ' + err.message);
       } finally {
         setUpdating(false);
       }
@@ -5153,7 +5535,29 @@ return (
         return;
       }
 
+      if (profileData.newPassword.length < 8) {
+        setError('New password must be at least 8 characters long');
+        setChangingPassword(false);
+        return;
+      }
+
+      if (!/(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(profileData.newPassword)) {
+        setError('Password must contain uppercase, lowercase, and number');
+        setChangingPassword(false);
+        return;
+      }
+
       try {
+        console.log('🔐 Changing password for user in tenant:', currentTenant?.tenantId);
+
+        // FIXED: Check if cognitoService has proper authentication
+        if (!cognitoService.currentUser || !cognitoService.accessToken) {
+          console.error('❌ No authenticated session found');
+          setError('Authentication session expired. Please sign in again.');
+          setChangingPassword(false);
+          return;
+        }
+
         const result = await cognitoService.changePassword(
           profileData.currentPassword,
           profileData.newPassword
@@ -5172,11 +5576,21 @@ return (
           setError(result.error);
         }
       } catch (err) {
-        setError('Failed to change password');
+        console.error('❌ Password change error:', err);
+        setError('Failed to change password: ' + err.message);
       } finally {
         setChangingPassword(false);
       }
     };
+
+    if (loading) {
+      return (
+        <div className="flex items-center justify-center h-64">
+          <div className="w-8 h-8 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin mx-auto"></div>
+          <p className="text-gray-400 ml-4">Loading profile...</p>
+        </div>
+      );
+    }
 
     return (
       <div className="space-y-6">
@@ -5184,7 +5598,7 @@ return (
           <h1 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 mb-2 animate-pulse">
             Profile Settings
           </h1>
-          <p className="text-gray-400">Manage your AWS Cognito account information</p>
+          <p className="text-gray-400">Manage your AWS Cognito account in {currentTenant?.tenantName || 'your organization'}</p>
         </div>
 
         {error && (
@@ -5203,27 +5617,35 @@ return (
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Profile Header */}
-          {/* Profile Header */}
           <div className="bg-gray-900/60 backdrop-blur-sm border border-cyan-500/20 rounded-xl p-6 hover:border-cyan-500/30 transition-all group">
             <div className="text-center">
               <div className="relative w-32 h-32 flex items-center justify-center mb-4 mx-auto">
-                {localStorage.getItem('adminLogo') ? (
+                {currentTenant?.logoUrl ? (
                   <img
-                    src={localStorage.getItem('adminLogo')}
-                    alt="System logo"
+                    src={currentTenant.logoUrl}
+                    alt="Organization logo"
                     className="w-28 h-28 object-cover rounded-full"
-                    key={logoVersion}
+                    onLoad={() => console.log('✅ Organization logo loaded successfully')}
+                    onError={(e) => {
+                      console.warn('⚠️ Failed to load organization logo, using fallback');
+                      e.target.style.display = 'none';
+                      e.target.nextSibling.style.display = 'flex';
+                    }}
                   />
-                ) : (
-                  <div className="w-28 h-28 rounded-full bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center">
-                    <span className="text-3xl font-bold text-white">
-                      {currentUser?.username?.charAt(0).toUpperCase()}
-                    </span>
-                  </div>
-                )}
-                <button className="absolute bottom-2 right-2 p-2 bg-cyan-500 rounded-full text-white hover:bg-cyan-400 transition-all transform hover:scale-110">
-                  <Camera className="w-4 h-4" />
-                </button>
+                ) : null}
+                <div
+                  className="w-28 h-28 rounded-full bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center"
+                  style={{
+                    display: currentTenant?.logoUrl ? 'none' : 'flex'
+                  }}
+                >
+                  <span className="text-3xl font-bold text-white">
+                    {currentUser?.username?.charAt(0).toUpperCase()}
+                  </span>
+                </div>
+                <div className="absolute -bottom-2 -right-2 px-2 py-1 bg-cyan-500 rounded-full text-white text-xs font-medium">
+                  {currentUser?.role?.toUpperCase()}
+                </div>
               </div>
               <h3 className="text-2xl font-semibold text-white group-hover:text-cyan-300 transition-colors">
                 {currentUser?.username}
@@ -5233,18 +5655,18 @@ return (
 
               <div className="mt-4 p-3 bg-cyan-500/10 border border-cyan-400/30 rounded-lg">
                 <div className="flex items-center justify-center space-x-2 mb-2">
-                  <Shield className="w-4 h-4 text-cyan-400" />
-                  <span className="text-sm font-medium text-cyan-400">AWS Cognito User</span>
+                  <Building className="w-4 h-4 text-cyan-400" />
+                  <span className="text-sm font-medium text-cyan-400">Organization Member</span>
                 </div>
                 <p className="text-xs text-cyan-300">
-                  Authenticated via AWS Cognito<br />
-                  Session managed securely
+                  {currentTenant?.tenantName || 'Unknown Organization'}<br />
+                  Authenticated via AWS Cognito
                 </p>
               </div>
+
+
             </div>
           </div>
-
-
 
           {/* Profile Information */}
           <div className="lg:col-span-2 bg-gray-900/60 backdrop-blur-sm border border-cyan-500/20 rounded-xl p-6 hover:border-cyan-500/30 transition-all group">
@@ -5288,7 +5710,16 @@ return (
                   />
                 </div>
 
-
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Organization</label>
+                  <input
+                    type="text"
+                    value={currentTenant?.tenantName || 'Unknown'}
+                    readOnly
+                    className="w-full px-4 py-3 bg-gray-800/30 border border-gray-600/50 rounded-lg text-gray-400 cursor-not-allowed"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Organization managed by admin</p>
+                </div>
               </div>
 
               <div className="flex justify-end">
@@ -5313,74 +5744,91 @@ return (
             </form>
           </div>
 
-          {/* Change Password */}
-          <div className="lg:col-span-3 bg-gray-900/60 backdrop-blur-sm border border-cyan-500/20 rounded-xl p-6 hover:border-cyan-500/30 transition-all group">
-            <h3 className="text-lg font-semibold text-white mb-4 group-hover:text-cyan-300 transition-colors flex items-center">
-              <KeyRound className="w-5 h-5 mr-2 text-cyan-400" />
-              Change Password
-            </h3>
+          {/* Change Password - ONLY FOR ADMIN */}
+          {currentUser?.role === 'admin' && (
+            <div className="lg:col-span-3 bg-gray-900/60 backdrop-blur-sm border border-cyan-500/20 rounded-xl p-6 hover:border-cyan-500/30 transition-all group">
+              <h3 className="text-lg font-semibold text-white mb-4 group-hover:text-cyan-300 transition-colors flex items-center">
+                <KeyRound className="w-5 h-5 mr-2 text-cyan-400" />
+                Change Password (Admin Only)
+              </h3>
 
-            <form onSubmit={handleChangePassword} className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Current Password</label>
-                  <input
-                    type="password"
-                    value={profileData.currentPassword}
-                    onChange={(e) => setProfileData({ ...profileData, currentPassword: e.target.value })}
-                    placeholder="Enter current password"
-                    className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all transform focus:scale-105"
-                    required
-                  />
+              <form onSubmit={handleChangePassword} className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Current Password</label>
+                    <input
+                      type="password"
+                      value={profileData.currentPassword}
+                      onChange={(e) => setProfileData({ ...profileData, currentPassword: e.target.value })}
+                      placeholder="Enter current password"
+                      className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all transform focus:scale-105"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">New Password</label>
+                    <input
+                      type="password"
+                      value={profileData.newPassword}
+                      onChange={(e) => setProfileData({ ...profileData, newPassword: e.target.value })}
+                      placeholder="Enter new password"
+                      className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all transform focus:scale-105"
+                      required
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Min 8 chars, uppercase, lowercase, number</p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Confirm New Password</label>
+                    <input
+                      type="password"
+                      value={profileData.confirmPassword}
+                      onChange={(e) => setProfileData({ ...profileData, confirmPassword: e.target.value })}
+                      placeholder="Confirm new password"
+                      className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all transform focus:scale-105"
+                      required
+                    />
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">New Password</label>
-                  <input
-                    type="password"
-                    value={profileData.newPassword}
-                    onChange={(e) => setProfileData({ ...profileData, newPassword: e.target.value })}
-                    placeholder="Enter new password"
-                    className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all transform focus:scale-105"
-                    required
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Min 8 chars, uppercase, lowercase, number</p>
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={changingPassword || !profileData.currentPassword || !profileData.newPassword || !profileData.confirmPassword}
+                    className="px-6 py-3 bg-gradient-to-r from-amber-500 via-orange-600 to-red-600 text-white font-medium rounded-lg hover:from-amber-400 hover:via-orange-500 hover:to-red-500 transition-all duration-300 transform hover:scale-105 disabled:opacity-50 flex items-center space-x-2"
+                  >
+                    {changingPassword ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        <span>Changing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-4 h-4" />
+                        <span>Change Password</span>
+                      </>
+                    )}
+                  </button>
                 </div>
+              </form>
+            </div>
+          )}
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Confirm New Password</label>
-                  <input
-                    type="password"
-                    value={profileData.confirmPassword}
-                    onChange={(e) => setProfileData({ ...profileData, confirmPassword: e.target.value })}
-                    placeholder="Confirm new password"
-                    className="w-full px-4 py-3 bg-gray-800/50 border border-cyan-500/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all transform focus:scale-105"
-                    required
-                  />
-                </div>
+          {/* Information for non-admin users */}
+          {currentUser?.role !== 'admin' && (
+            <div className="lg:col-span-3 bg-gray-900/60 backdrop-blur-sm border border-cyan-500/20 rounded-xl p-6">
+              <div className="text-center py-8">
+                <Lock className="w-12 h-12 mx-auto mb-4 text-gray-400" />
+                <h3 className="text-lg font-semibold text-gray-300 mb-2">Password Management</h3>
+                <p className="text-gray-400 text-sm">
+                  Password changes for {currentUser?.role} accounts are managed by your organization administrator.
+                  <br />
+                  Please contact your admin if you need to change your password.
+                </p>
               </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="submit"
-                  disabled={changingPassword || !profileData.currentPassword || !profileData.newPassword || !profileData.confirmPassword}
-                  className="px-6 py-3 bg-gradient-to-r from-amber-500 via-orange-600 to-red-600 text-white font-medium rounded-lg hover:from-amber-400 hover:via-orange-500 hover:to-red-500 transition-all duration-300 transform hover:scale-105 disabled:opacity-50 flex items-center space-x-2"
-                >
-                  {changingPassword ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                      <span>Changing...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Lock className="w-4 h-4" />
-                      <span>Change Password</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            </form>
-          </div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -5394,9 +5842,9 @@ return (
       case 'control': return <ControlPage controlMode={controlMode} setControlMode={setControlMode} />;
       case 'reports': return <ReportsPage />;
       case 'groups': return <GroupsPage />;
-      case 'users': return <UsersPage />;
-      case 'settings': return <SettingsPage />;
-      case 'profile': return <ProfilePage />;
+      case 'users': return <UsersPage currentUser={currentUser} currentTenant={currentTenant} />; // Make sure props are passed
+      case 'settings': return <SettingsPage currentUser={currentUser} currentTenant={currentTenant} />;
+      case 'profile': return <ProfilePage currentUser={currentUser} currentTenant={currentTenant} />;
       default: return <HomePage />;
     }
   };
@@ -5415,10 +5863,10 @@ return (
       <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
         <div className="absolute inset-0 opacity-30" style={{
           backgroundImage: `
-          radial-gradient(circle at 20% 20%, rgba(0, 255, 255, 0.1) 0%, transparent 50%),
-          radial-gradient(circle at 80% 80%, rgba(0, 100, 255, 0.1) 0%, transparent 50%),
-          radial-gradient(circle at 40% 60%, rgba(100, 0, 255, 0.1) 0%, transparent 50%)
-        `,
+         radial-gradient(circle at 20% 20%, rgba(0, 255, 255, 0.1) 0%, transparent 50%),
+         radial-gradient(circle at 80% 80%, rgba(0, 100, 255, 0.1) 0%, transparent 50%),
+         radial-gradient(circle at 40% 60%, rgba(100, 0, 255, 0.1) 0%, transparent 50%)
+       `,
           minHeight: '100vh',
           width: '100vw'
         }}></div>
@@ -5427,7 +5875,8 @@ return (
       <Sidebar />
 
       <div className="flex-1 flex flex-col relative z-10">
-        {/* Enhanced Header */}
+        {/* Enhanced Header with Tenant Info */}
+        {/* Enhanced Header with Tenant Info */}
         <header className="bg-gray-900/80 backdrop-blur-xl border-b border-cyan-500/20 px-6 py-4 relative overflow-hidden" style={{
           boxShadow: '0 0 20px rgba(0, 255, 255, 0.1)'
         }}>
@@ -5447,10 +5896,28 @@ return (
                 </h1>
                 <div className="absolute -bottom-1 left-0 w-full h-0.5 bg-gradient-to-r from-cyan-400 to-blue-400 animate-pulse"></div>
               </div>
+              {currentTenant && (
+                <div className="hidden md:flex items-center space-x-2 bg-gray-800/30 backdrop-blur-sm border border-cyan-500/20 rounded-lg px-3 py-1">
+                  <Building className="w-4 h-4 text-cyan-400" />
+                  <span className="text-sm text-cyan-300">
+                    {currentTenant.tenantName?.length > 25 ?
+                      currentTenant.tenantName.substring(0, 25) + '...' :
+                      currentTenant.tenantName
+                    }
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center space-x-4">
-              <button className="p-2 rounded-lg hover:bg-cyan-500/20 text-cyan-400 transition-all relative transform hover:scale-110">
+              <button
+                onClick={() => {
+                  setActiveTab('reports');
+                  if (isMobile) setMobileMenuOpen(false);
+                }}
+                className="p-2 rounded-lg hover:bg-cyan-500/20 text-cyan-400 transition-all relative transform hover:scale-110"
+                title="View Reports"
+              >
                 <Bell className="w-5 h-5" />
                 <div className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full animate-ping"></div>
                 <div className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full"></div>
@@ -5459,18 +5926,26 @@ return (
               {!isMobile && (
                 <div className="flex items-center space-x-3 bg-gray-800/30 backdrop-blur-sm border border-cyan-500/20 rounded-lg p-2 hover:border-cyan-500/40 transition-all">
                   <div className="w-8 h-8 flex items-center justify-center">
-                    {localStorage.getItem('adminLogo') ? (
+                    {currentTenant?.logoUrl ? (
                       <img
-                        src={localStorage.getItem('adminLogo')}
-                        alt="System logo"
+                        src={currentTenant.logoUrl}
+                        alt="Organization logo"
                         className="w-7 h-7 object-cover rounded-full"
-                        key={logoVersion}
+                        onError={(e) => {
+                          // Fallback to user initial if logo fails
+                          e.target.style.display = 'none';
+                          e.target.nextSibling.style.display = 'flex';
+                        }}
                       />
-                    ) : (
-                      <div className="w-7 h-7 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 flex items-center justify-center text-sm font-bold text-white">
-                        {currentUser?.username?.charAt(0).toUpperCase() || 'U'}
-                      </div>
-                    )}
+                    ) : null}
+                    <div
+                      className="w-7 h-7 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 flex items-center justify-center text-sm font-bold text-white"
+                      style={{
+                        display: currentTenant?.logoUrl ? 'none' : 'flex'
+                      }}
+                    >
+                      {currentUser?.username?.charAt(0).toUpperCase() || 'U'}
+                    </div>
                   </div>
                   <div>
                     <p className="text-sm font-medium text-white">{currentUser?.username}</p>
@@ -5478,9 +5953,10 @@ return (
                   </div>
                   <button
                     onClick={() => {
-                      setCurrentUser(null); // Clear current user
-                      setActiveTab(''); // Reset activeTab on logout
-                      cognitoService.signOut(); // Perform Cognito sign-out
+                      setCurrentUser(null);
+                      setCurrentTenant(null);
+                      setActiveTab('');
+                      cognitoService.signOut();
                     }}
                     className="p-1 rounded hover:bg-red-500/20 text-red-400 transition-all transform hover:scale-110"
                     title="Logout"

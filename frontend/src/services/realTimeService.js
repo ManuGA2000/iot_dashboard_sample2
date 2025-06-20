@@ -1,4 +1,4 @@
-// COMPLETELY FIXED: Real-time service with stable connection and optimized data flow
+// COMPLETELY FIXED: Real-time service with stable connection and multi-tenant support
 class RealTimeService {
     constructor() {
         this.ws = null;
@@ -8,14 +8,15 @@ class RealTimeService {
         this.awsThings = new Map();
         this.listeners = new Map();
         this.isInitialized = false;
-        this.backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+        this.backendUrl = process.env.REACT_APP_BACKEND_URL || '//localhost:5000';
         this.wsUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:5001';
         this.connectionState = 'disconnected';
         this.heartbeatInterval = null;
         this.deviceStates = new Map();
         this.lastUpdateTimes = new Map();
         this.initPromise = null;
-        
+        this.currentTenantId = null;
+
         // FIXED: Enhanced state tracking to prevent duplicates
         this.isLoadingInitialData = false;
         this.hasLoadedInitialData = false;
@@ -25,7 +26,7 @@ class RealTimeService {
         this.reconnectTimeoutId = null;
         this.isDestroyed = false;
         this.pendingOperations = new Map();
-        
+
         // FIXED: Stable connection tracking
         this.connectionAttempts = 0;
         this.lastConnectionTime = 0;
@@ -33,7 +34,27 @@ class RealTimeService {
         this.maxReconnectDelay = 30000;
     }
 
-    async initialize() {
+    setTenantContext(tenantId) {
+        console.log('🏢 Setting tenant context:', tenantId);
+        this.currentTenantId = tenantId;
+
+        // Clear existing data when switching tenants
+        if (tenantId !== this.previousTenantId) {
+            this.awsThings.clear();
+            this.deviceStates.clear();
+            this.lastUpdateTimes.clear();
+            this.hasLoadedInitialData = false;
+            this.previousTenantId = tenantId;
+            console.log('🧹 Cleared data for tenant switch');
+        }
+    }
+
+    async initialize(tenantId = null) {
+        // FIXED: Set tenant context if provided
+        if (tenantId) {
+            this.setTenantContext(tenantId);
+        }
+
         // FIXED: Prevent multiple initializations
         if (this.isInitialized) {
             console.log('🔄 Service already initialized, returning existing connection');
@@ -51,7 +72,8 @@ class RealTimeService {
 
     async _doInitialize() {
         try {
-            console.log('🔄 Initializing Real-time Service with stable connection management...');
+            console.log('🔄 Initializing Real-time Service with multi-tenant support...');
+            console.log('🏢 Current tenant:', this.currentTenantId || 'No tenant context');
 
             // FIXED: Test connection only once
             if (!this.hasLoadedInitialData) {
@@ -61,7 +83,7 @@ class RealTimeService {
             // FIXED: Initialize WebSocket with proper state management
             await this._initializeWebSocketStable();
 
-            // FIXED: Load initial data only once
+            // FIXED: Load initial data only once for current tenant
             if (!this.hasLoadedInitialData) {
                 await this._loadInitialDataStable();
                 this.hasLoadedInitialData = true;
@@ -72,7 +94,7 @@ class RealTimeService {
 
             this.isInitialized = true;
             this.connectionAttempts = 0;
-            console.log('✅ Real-time service initialized with stable connection');
+            console.log('✅ Real-time service initialized with multi-tenant support');
 
             return true;
         } catch (error) {
@@ -90,7 +112,10 @@ class RealTimeService {
 
             const response = await fetch(`${this.backendUrl}/api/health`, {
                 method: 'GET',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Tenant-ID': this.currentTenantId || ''
+                },
                 mode: 'cors',
                 signal: controller.signal
             });
@@ -110,7 +135,7 @@ class RealTimeService {
         }
     }
 
-    // FIXED: Stable WebSocket initialization with better error handling
+    // FIXED: Stable WebSocket initialization with tenant context
     _initializeWebSocketStable() {
         return new Promise((resolve, reject) => {
             try {
@@ -122,6 +147,7 @@ class RealTimeService {
                 }
 
                 console.log('🔌 Connecting to WebSocket for real-time updates:', this.wsUrl);
+                console.log('🏢 Tenant context:', this.currentTenantId || 'No tenant');
 
                 if (this.ws) {
                     this.ws.close();
@@ -149,6 +175,16 @@ class RealTimeService {
                 this.ws.addEventListener('open', () => {
                     clearTimeoutSafely();
                     console.log('✅ WebSocket connected - Real-time MQTT updates active');
+
+                    // Send tenant context to backend
+                    if (this.currentTenantId) {
+                        this.ws.send(JSON.stringify({
+                            type: 'set_tenant_context',
+                            tenantId: this.currentTenantId,
+                            timestamp: Date.now()
+                        }));
+                    }
+
                     this.reconnectAttempts = 0;
                     this.connectionState = 'connected';
                     this.lastConnectionTime = Date.now();
@@ -177,7 +213,7 @@ class RealTimeService {
                     console.error('❌ WebSocket error:', error);
                     this.connectionState = 'error';
                     this._notifyListeners('connection', { status: 'error', error });
-                    
+
                     if (this.connectionAttempts <= 1) {
                         reject(new Error(`WebSocket connection failed: ${error.message || 'Unknown error'}`));
                     }
@@ -190,7 +226,7 @@ class RealTimeService {
         });
     }
 
-    // FIXED: Optimized message handling with duplicate prevention
+    // FIXED: Enhanced message handling with tenant filtering
     _handleWebSocketMessageStable(event) {
         try {
             if (!event.data || event.data.trim() === '') {
@@ -205,19 +241,24 @@ class RealTimeService {
                 return;
             }
 
+            // FIXED: Filter messages by tenant context
+            if (data.tenantId && this.currentTenantId && data.tenantId !== this.currentTenantId) {
+                console.log('🏢 Ignoring message for different tenant:', data.tenantId);
+                return;
+            }
+
             // FIXED: Throttle frequent updates to prevent spam
             const messageKey = `${data.type}-${data.deviceId || 'system'}`;
             const lastUpdate = this.updateThrottleMap.get(messageKey);
             const now = Date.now();
-            
+
             if (lastUpdate && (now - lastUpdate) < 500) {
-                // Skip if same message type for same device within 500ms
                 return;
             }
-            
+
             this.updateThrottleMap.set(messageKey, now);
 
-            console.log('📨 Real-time message received:', data.type, data.source || '');
+            console.log('📨 Real-time message received for tenant:', this.currentTenantId, data.type, data.source || '');
 
             switch (data.type) {
                 case 'connection_status':
@@ -266,13 +307,14 @@ class RealTimeService {
                 return;
             }
 
-            console.log('📱 Device created via real-time:', device.id);
-            
-            // FIXED: Update internal state efficiently
+            console.log('📱 Device created via real-time for tenant:', this.currentTenantId, device.id);
+
+            // FIXED: Update internal state efficiently with tenant context
+            device.tenantId = this.currentTenantId;
             this.awsThings.set(device.id, device);
             this.deviceStates.set(device.id, JSON.stringify(device));
             this.lastUpdateTimes.set(device.id, Date.now());
-            
+
             this._notifyListeners('device_created', device);
 
             // FIXED: Request status sync with delay to avoid overwhelming
@@ -293,15 +335,15 @@ class RealTimeService {
                 return;
             }
 
-            console.log('🗑️ Device deleted via real-time:', deviceId);
-            
+            console.log('🗑️ Device deleted via real-time for tenant:', this.currentTenantId, deviceId);
+
             // Clean up all references
             this.awsThings.delete(deviceId);
             this.deviceStates.delete(deviceId);
             this.lastUpdateTimes.delete(deviceId);
             this.statusSyncInProgress.delete(deviceId);
             this.lastDeviceHashes.delete(deviceId);
-            
+
             this._notifyListeners('device_deleted', { deviceId });
 
         } catch (error) {
@@ -309,81 +351,83 @@ class RealTimeService {
         }
     }
 
-    // FIXED: Optimized device status update handling
-_handleDeviceStatusUpdateStable(data) {
-  try {
-    const { deviceId, device, timestamp, source } = data;
-    
-    if (!deviceId || !device) {
-      console.warn('⚠️ Invalid device status update data:', data);
-      return;
+    // FIXED: Device status update handling with tenant context
+    _handleDeviceStatusUpdateStable(data) {
+        try {
+            const { deviceId, device, timestamp, source } = data;
+
+            if (!deviceId || !device) {
+                console.warn('⚠️ Invalid device status update data:', data);
+                return;
+            }
+
+            console.log(`📡 Processing ${source} update for tenant ${this.currentTenantId} device ${deviceId}:`, device.status);
+
+            // Get existing device
+            const existingDevice = this.awsThings.get(deviceId) || {};
+
+            // FIXED: Always update device immediately for real-time UI updates
+            const updatedDevice = {
+                ...existingDevice,
+                ...device,
+                id: deviceId,
+                tenantId: this.currentTenantId,
+                features: device.features || existingDevice.features || {
+                    siren: false,
+                    beacon: false,
+                    announcement: false,
+                    dispenser: false
+                },
+                relayStates: device.relayStates || existingDevice.relayStates || {
+                    relay1: false,
+                    relay2: false,
+                    relay3: false,
+                    relay4: false
+                },
+                status: device.status || existingDevice.status || 'offline',
+                lastSeen: device.lastSeen || new Date().toLocaleTimeString(),
+                lastUpdateTime: timestamp || new Date().toISOString(),
+                signalStrength: device.signalStrength || existingDevice.signalStrength || 85,
+                batteryLevel: device.batteryLevel || existingDevice.batteryLevel || 100
+            };
+
+            // Update internal state immediately
+            this.awsThings.set(deviceId, updatedDevice);
+            this.deviceStates.set(deviceId, JSON.stringify(updatedDevice));
+            this.lastUpdateTimes.set(deviceId, Date.now());
+
+            // Always notify listeners for real-time updates
+            this._notifyListeners('device_status_update', {
+                deviceId,
+                device: updatedDevice,
+                timestamp: timestamp || new Date().toISOString(),
+                source: source || 'status_update',
+                tenantId: this.currentTenantId
+            });
+
+            console.log(`✅ Real-time update processed for tenant ${this.currentTenantId}: ${deviceId} - Status: ${updatedDevice.status}`);
+
+        } catch (error) {
+            console.error('❌ Error handling real-time status update:', error);
+        }
     }
 
-    console.log(`📡 Processing ${source} update for ${deviceId}:`, device.status);
-
-    // Get existing device
-    const existingDevice = this.awsThings.get(deviceId) || {};
-
-    // FIXED: Always update device immediately for real-time UI updates
-    const updatedDevice = {
-      ...existingDevice,
-      ...device,
-      id: deviceId,
-      features: device.features || existingDevice.features || {
-        siren: false,
-        beacon: false,
-        announcement: false,
-        dispenser: false
-      },
-      relayStates: device.relayStates || existingDevice.relayStates || {
-        relay1: false,
-        relay2: false,
-        relay3: false,
-        relay4: false
-      },
-      status: device.status || existingDevice.status || 'offline',
-      lastSeen: device.lastSeen || new Date().toLocaleTimeString(),
-      lastUpdateTime: timestamp || new Date().toISOString(),
-      signalStrength: device.signalStrength || existingDevice.signalStrength || 85,
-      batteryLevel: device.batteryLevel || existingDevice.batteryLevel || 100
-    };
-
-    // Update internal state immediately
-    this.awsThings.set(deviceId, updatedDevice);
-    this.deviceStates.set(deviceId, JSON.stringify(updatedDevice));
-    this.lastUpdateTimes.set(deviceId, Date.now());
-
-    // Always notify listeners for real-time updates
-    this._notifyListeners('device_status_update', {
-      deviceId,
-      device: updatedDevice,
-      timestamp: timestamp || new Date().toISOString(),
-      source: source || 'status_update'
-    });
-
-    console.log(`✅ Real-time update processed: ${deviceId} - Status: ${updatedDevice.status}`);
-    
-  } catch (error) {
-    console.error('❌ Error handling real-time status update:', error);
-  }
-}
-
     _handleCommandSentStable(data) {
-        console.log('📤 Command sent event:', data);
+        console.log('📤 Command sent event for tenant:', this.currentTenantId, data);
         this._notifyListeners('command_sent', data);
     }
 
     _handleScenarioExecutedStable(data) {
-        console.log('🎭 Scenario executed event:', data);
+        console.log('🎭 Scenario executed event for tenant:', this.currentTenantId, data);
         this._notifyListeners('scenario_executed', data);
     }
 
     _handleMqttMessageStable(data) {
-        console.log('📡 MQTT message event:', data);
+        console.log('📡 MQTT message event for tenant:', this.currentTenantId, data);
         this._notifyListeners('mqtt_message', data);
     }
 
-    // FIXED: Stable initial data loading with proper error handling
+    // FIXED: Stable initial data loading with tenant context
     async _loadInitialDataStable() {
         if (this.isLoadingInitialData) {
             console.log('📋 Already loading initial data, skipping...');
@@ -393,19 +437,20 @@ _handleDeviceStatusUpdateStable(data) {
         this.isLoadingInitialData = true;
 
         try {
-            console.log('📋 Loading device registry and requesting status sync...');
+            console.log('📋 Loading device registry for tenant:', this.currentTenantId);
 
             const [devicesResponse, groupsResponse] = await Promise.all([
-                this.fetchDevices(),
-                this.fetchGroups()
+                this.fetchDevices(this.currentTenantId),
+                this.fetchGroups(this.currentTenantId)
             ]);
 
             if (devicesResponse.success) {
-                console.log('📋 Loaded device registry:', devicesResponse.devices.length, 'devices');
-                
+                console.log('📋 Loaded device registry for tenant:', this.currentTenantId, devicesResponse.devices.length, 'devices');
+
                 devicesResponse.devices.forEach(device => {
                     const registryDevice = {
                         ...device,
+                        tenantId: this.currentTenantId,
                         features: device.features || {
                             siren: false,
                             beacon: false,
@@ -420,7 +465,7 @@ _handleDeviceStatusUpdateStable(data) {
                         },
                         status: device.status || 'offline'
                     };
-                    
+
                     this.awsThings.set(device.id, registryDevice);
                     this.deviceStates.set(device.id, JSON.stringify(registryDevice));
                     this.lastUpdateTimes.set(device.id, Date.now());
@@ -428,23 +473,23 @@ _handleDeviceStatusUpdateStable(data) {
 
                 // FIXED: Request status sync with proper timing
                 setTimeout(() => {
-                    console.log('🔄 Requesting immediate status sync for all devices...');
+                    console.log('🔄 Requesting immediate status sync for tenant devices...');
                     this.refreshAllDeviceStatus();
-                }, 3000); // Increased delay to prevent overwhelming
+                }, 3000);
 
-                console.log('✅ Device registry loaded - MQTT status updates will follow');
+                console.log('✅ Device registry loaded for tenant - MQTT status updates will follow');
             } else {
-                console.error('❌ Failed to load device registry:', devicesResponse.error);
+                console.error('❌ Failed to load device registry for tenant:', this.currentTenantId, devicesResponse.error);
             }
 
             if (groupsResponse.success) {
-                console.log('📁 Loaded groups registry:', groupsResponse.groups.length, 'groups');
+                console.log('📁 Loaded groups registry for tenant:', this.currentTenantId, groupsResponse.groups.length, 'groups');
             } else {
-                console.error('❌ Failed to load groups:', groupsResponse.error);
+                console.error('❌ Failed to load groups for tenant:', this.currentTenantId, groupsResponse.error);
             }
 
         } catch (error) {
-            console.error('❌ Error loading initial data:', error);
+            console.error('❌ Error loading initial data for tenant:', this.currentTenantId, error);
         } finally {
             this.isLoadingInitialData = false;
         }
@@ -466,7 +511,7 @@ _handleDeviceStatusUpdateStable(data) {
         }
 
         this.reconnectAttempts++;
-        
+
         // Exponential backoff with jitter
         const baseDelay = Math.min(this.minReconnectDelay * Math.pow(2, this.reconnectAttempts - 1), this.maxReconnectDelay);
         const jitter = Math.random() * 1000;
@@ -476,7 +521,7 @@ _handleDeviceStatusUpdateStable(data) {
 
         this.reconnectTimeoutId = setTimeout(() => {
             if (this.isDestroyed) return;
-            
+
             this._initializeWebSocketStable().catch(error => {
                 console.error('❌ Reconnection failed:', error);
                 this._attemptReconnectStable();
@@ -493,9 +538,10 @@ _handleDeviceStatusUpdateStable(data) {
         this.heartbeatInterval = setInterval(() => {
             if (this.ws && this.ws.readyState === WebSocket.OPEN && !this.isDestroyed) {
                 try {
-                    this.ws.send(JSON.stringify({ 
-                        type: 'ping', 
-                        timestamp: Date.now() 
+                    this.ws.send(JSON.stringify({
+                        type: 'ping',
+                        tenantId: this.currentTenantId,
+                        timestamp: Date.now()
                     }));
                 } catch (error) {
                     console.warn('⚠️ Heartbeat failed:', error);
@@ -511,7 +557,7 @@ _handleDeviceStatusUpdateStable(data) {
         }
         this.listeners.get(event).add(callback);
         console.log(`📡 Real-time listener added for: ${event}`);
-        
+
         return () => {
             this.off(event, callback);
         };
@@ -530,13 +576,13 @@ _handleDeviceStatusUpdateStable(data) {
     _notifyListeners(event, data) {
         if (this.listeners.has(event)) {
             const listeners = this.listeners.get(event);
-            
+
             if (listeners.size === 0) {
                 return;
             }
-            
-            console.log(`📢 Notifying ${listeners.size} listeners for: ${event}`);
-            
+
+            console.log(`📢 Notifying ${listeners.size} listeners for: ${event} (tenant: ${this.currentTenantId})`);
+
             listeners.forEach(callback => {
                 try {
                     callback(data);
@@ -547,16 +593,28 @@ _handleDeviceStatusUpdateStable(data) {
         }
     }
 
-    // FIXED: Stable HTTP request helper with retry logic
+    // FIXED: HTTP request helper with tenant context
     async _makeRequest(url, options = {}) {
         const defaultOptions = {
             method: 'GET',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Tenant-ID': this.currentTenantId || ''
+            },
             mode: 'cors',
             credentials: 'same-origin'
         };
 
-        const requestOptions = { ...defaultOptions, ...options };
+        // Merge headers properly
+        const requestOptions = {
+            ...defaultOptions,
+            ...options,
+            headers: {
+                ...defaultOptions.headers,
+                ...(options.headers || {})
+            }
+        };
+
         const maxRetries = 3;
         let lastError;
 
@@ -595,96 +653,97 @@ _handleDeviceStatusUpdateStable(data) {
         throw lastError;
     }
 
-    // FIXED: Enhanced toggle feature with optimistic updates and proper error handling
-// Enhanced toggle feature with ACK timeout notification
-async toggleDeviceFeature(deviceId, feature) {
-  try {
-    console.log(`🎛️ Real-time toggle: ${feature} for device ${deviceId}`);
+    // FIXED: Enhanced toggle feature with tenant context and ACK timeout notification
+    async toggleDeviceFeature(deviceId, feature) {
+        try {
+            console.log(`🎛️ Real-time toggle for tenant ${this.currentTenantId}: ${feature} for device ${deviceId}`);
 
-    const device = this.awsThings.get(deviceId);
-    if (!device) {
-      throw new Error(`Device ${deviceId} not found`);
+            const device = this.awsThings.get(deviceId);
+            if (!device) {
+                throw new Error(`Device ${deviceId} not found in tenant ${this.currentTenantId}`);
+            }
+
+            const currentFeatureState = device.features?.[feature] || false;
+            const newFeatureState = !currentFeatureState;
+
+            console.log(`🎛️ Sending command to ${feature}: ${currentFeatureState} → ${newFeatureState}`);
+            console.log(`⏳ Waiting for hardware acknowledgment on ${deviceId}/relay/ack...`);
+
+            // Send command with tenant context
+            const result = await this._makeRequest(`${this.backendUrl}/api/iot/command`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    deviceId,
+                    command: newFeatureState ? `${feature}_on` : `${feature}_off`,
+                    data: {
+                        feature,
+                        state: newFeatureState
+                    },
+                    tenantId: this.currentTenantId
+                }),
+            });
+
+            if (result.success) {
+                console.log(`✅ Command sent for tenant ${this.currentTenantId} - waiting for hardware ACK on ${deviceId}/relay/ack`);
+
+                // Set up ACK timeout notification (15 seconds)
+                setTimeout(() => {
+                    const currentDevice = this.awsThings.get(deviceId);
+                    const currentState = currentDevice?.features?.[feature];
+
+                    // Check if the feature state actually changed (ACK received)
+                    if (currentState === currentFeatureState) {
+                        // ACK not received - show notification
+                        this._notifyListeners('ack_timeout', {
+                            deviceId,
+                            feature,
+                            tenantId: this.currentTenantId,
+                            message: `ACK not received from ${deviceId} for ${feature} toggle. Hardware may not have responded.`,
+                            timestamp: new Date().toISOString()
+                        });
+                        console.warn(`⚠️ ACK timeout for tenant ${this.currentTenantId} device ${deviceId} ${feature} toggle`);
+                    }
+                }, 15000);
+
+                return {
+                    success: true,
+                    message: `${feature} command sent - waiting for hardware confirmation`
+                };
+            } else {
+                throw new Error(result.message || 'Command failed');
+            }
+        } catch (error) {
+            console.error('❌ Error in real-time toggle for tenant:', this.currentTenantId, error);
+            return {
+                success: false,
+                message: error.message
+            };
+        }
     }
 
-    const currentFeatureState = device.features?.[feature] || false;
-    const newFeatureState = !currentFeatureState;
-
-    console.log(`🎛️ Sending command to ${feature}: ${currentFeatureState} → ${newFeatureState}`);
-    console.log(`⏳ Waiting for hardware acknowledgment on ${deviceId}/relay/ack...`);
-
-    // Send command
-    const result = await this._makeRequest(`${this.backendUrl}/api/iot/command`, {
-      method: 'POST',
-      body: JSON.stringify({
-        deviceId,
-        command: newFeatureState ? `${feature}_on` : `${feature}_off`,
-        data: {
-          feature,
-          state: newFeatureState
-        }
-      }),
-    });
-
-    if (result.success) {
-      console.log(`✅ Command sent - waiting for hardware ACK on ${deviceId}/relay/ack`);
-      
-      // Set up ACK timeout notification (15 seconds)
-      setTimeout(() => {
-        const currentDevice = this.awsThings.get(deviceId);
-        const currentState = currentDevice?.features?.[feature];
-        
-        // Check if the feature state actually changed (ACK received)
-        if (currentState === currentFeatureState) {
-          // ACK not received - show notification
-          this._notifyListeners('ack_timeout', {
-            deviceId,
-            feature,
-            message: `ACK not received from ${deviceId} for ${feature} toggle. Hardware may not have responded.`,
-            timestamp: new Date().toISOString()
-          });
-          console.warn(`⚠️ ACK timeout for ${deviceId} ${feature} toggle`);
-        }
-      }, 15000); // 15 second timeout
-      
-      return {
-        success: true,
-        message: `${feature} command sent - waiting for hardware confirmation`
-      };
-    } else {
-      throw new Error(result.message || 'Command failed');
-    }
-  } catch (error) {
-    console.error('❌ Error in real-time toggle:', error);
-    return {
-      success: false,
-      message: error.message
-    };
-  }
-}
-
-    // FIXED: Device status sync with proper error handling
+    // FIXED: Device status sync with tenant context
     async requestDeviceStatusSync(deviceId) {
         if (this.statusSyncInProgress.has(deviceId)) {
-            console.log(`📊 Status sync already in progress for ${deviceId}`);
+            console.log(`📊 Status sync already in progress for tenant ${this.currentTenantId} device ${deviceId}`);
             return { success: true, message: 'Status sync already in progress' };
         }
 
         try {
-            console.log(`📊 Requesting status sync for device: ${deviceId}`);
+            console.log(`📊 Requesting status sync for tenant ${this.currentTenantId} device: ${deviceId}`);
             this.statusSyncInProgress.add(deviceId);
-            
+
             const response = await this._makeRequest(`${this.backendUrl}/api/iot/sync-status/${deviceId}`, {
                 method: 'POST'
             });
 
             if (response.success) {
-                console.log(`✅ Status sync requested for ${deviceId}`);
+                console.log(`✅ Status sync requested for tenant ${this.currentTenantId} device ${deviceId}`);
                 return { success: true, message: 'Status sync requested' };
             } else {
                 throw new Error(response.message);
             }
         } catch (error) {
-            console.error('❌ Failed to sync device status:', error);
+            console.error('❌ Failed to sync device status for tenant:', this.currentTenantId, error);
             return { success: false, message: error.message };
         } finally {
             setTimeout(() => {
@@ -693,32 +752,46 @@ async toggleDeviceFeature(deviceId, feature) {
         }
     }
 
-    // FIXED: Refresh all device status
+    // FIXED: Refresh all device status with tenant context
     async refreshAllDeviceStatus() {
         try {
-            console.log('🔄 Requesting status refresh for all devices...');
-            
+            console.log('🔄 Requesting status refresh for all tenant devices:', this.currentTenantId);
+
             const response = await this._makeRequest(`${this.backendUrl}/api/iot/refresh-all-status`, {
                 method: 'POST'
             });
 
             if (response.success) {
-                console.log(`✅ Status refresh requested for all devices`);
+                console.log(`✅ Status refresh requested for all tenant ${this.currentTenantId} devices`);
                 return { success: true, message: response.message };
             } else {
                 throw new Error(response.message);
             }
         } catch (error) {
-            console.error('❌ Failed to refresh all device status:', error);
+            console.error('❌ Failed to refresh all device status for tenant:', this.currentTenantId, error);
             return { success: false, message: error.message };
         }
     }
 
-    // FIXED: Fetch devices with proper error handling
-    async fetchDevices() {
+    // FIXED: Fetch devices with tenant context
+    async fetchDevices(tenantId = null) {
         try {
-            const result = await this._makeRequest(`${this.backendUrl}/api/iot/things`);
-            const devices = result.devices || [];
+            const tenant = tenantId || this.currentTenantId;
+            console.log('📋 Fetching devices for tenant:', tenant);
+
+            const result = await this._makeRequest(`${this.backendUrl}/api/iot/things`, {
+                headers: {
+                    'X-Tenant-ID': tenant || ''
+                }
+            });
+
+            // FIXED: Filter devices by tenant ID to ensure only tenant-specific devices are returned
+            const devices = (result.devices || [])
+                .filter(device => !tenant || device.tenantId === tenant)
+                .map(device => ({
+                    ...device,
+                    tenantId: tenant
+                }));
 
             devices.forEach(device => {
                 const validatedDevice = {
@@ -737,7 +810,7 @@ async toggleDeviceFeature(deviceId, feature) {
                     },
                     status: device.status || 'offline'
                 };
-                
+
                 this.awsThings.set(device.id, validatedDevice);
                 this.deviceStates.set(device.id, JSON.stringify(validatedDevice));
                 this.lastUpdateTimes.set(device.id, Date.now());
@@ -745,32 +818,47 @@ async toggleDeviceFeature(deviceId, feature) {
 
             return { success: true, devices };
         } catch (error) {
-            console.error('❌ Error fetching devices:', error);
+            console.error('❌ Error fetching devices for tenant:', this.currentTenantId, error);
             return { success: false, devices: [], error: error.message };
         }
     }
 
-    // FIXED: Fetch groups with proper error handling
-    async fetchGroups() {
+    // FIXED: Fetch groups with tenant context
+    async fetchGroups(tenantId = null) {
         try {
-            const result = await this._makeRequest(`${this.backendUrl}/api/groups`);
+            const tenant = tenantId || this.currentTenantId;
+            console.log('📁 Fetching groups for tenant:', tenant);
+
+            const result = await this._makeRequest(`${this.backendUrl}/api/groups`, {
+                headers: {
+                    'X-Tenant-ID': tenant || ''
+                }
+            });
+
             return { success: true, groups: result.groups || [] };
         } catch (error) {
+            console.error('❌ Error fetching groups for tenant:', this.currentTenantId, error);
             return { success: false, groups: [], error: error.message };
         }
     }
 
-    // FIXED: Register device with proper error handling
+    // FIXED: Register device with tenant context
     async registerDevice(deviceData) {
         try {
+            console.log('📝 Registering device for tenant:', this.currentTenantId, deviceData);
+
             const result = await this._makeRequest(`${this.backendUrl}/api/iot/register-thing`, {
                 method: 'POST',
-                body: JSON.stringify(deviceData),
+                body: JSON.stringify({
+                    ...deviceData,
+                    tenantId: this.currentTenantId
+                }),
             });
 
             if (result.success && result.device) {
                 const validatedDevice = {
                     ...result.device,
+                    tenantId: this.currentTenantId,
                     features: result.device.features || {
                         siren: false,
                         beacon: false,
@@ -784,40 +872,47 @@ async toggleDeviceFeature(deviceId, feature) {
                         relay4: false
                     }
                 };
-                
+
                 this.awsThings.set(validatedDevice.id, validatedDevice);
                 this.deviceStates.set(validatedDevice.id, JSON.stringify(validatedDevice));
                 this.lastUpdateTimes.set(validatedDevice.id, Date.now());
-                
-                console.log('✅ Device registered - MQTT updates will follow');
+
+                console.log('✅ Device registered for tenant - MQTT updates will follow');
             }
 
             return result;
         } catch (error) {
-            console.error('❌ Error registering device:', error);
+            console.error('❌ Error registering device for tenant:', this.currentTenantId, error);
             throw error;
         }
     }
 
-    // FIXED: Delete device with proper cleanup
-    async deleteDeviceCompat(deviceId) {
+    // FIXED: Delete device with tenant context and proper cleanup
+    async deleteDeviceCompat(deviceId, tenantId = null) {
         try {
+            const tenant = tenantId || this.currentTenantId;
+            console.log('🗑️ Deleting device for tenant:', tenant, deviceId);
+
             const result = await this._makeRequest(`${this.backendUrl}/api/iot/things/${deviceId}`, {
                 method: 'DELETE',
+                headers: {
+                    'X-Tenant-ID': tenant || ''
+                }
             });
-            
+
             // Clean up local state
             this.awsThings.delete(deviceId);
             this.deviceStates.delete(deviceId);
             this.lastUpdateTimes.delete(deviceId);
             this.statusSyncInProgress.delete(deviceId);
             this.lastDeviceHashes.delete(deviceId);
-            
+
             return {
                 success: result.success,
                 message: result.message || 'Device deleted successfully'
             };
         } catch (error) {
+            console.error('❌ Error deleting device for tenant:', this.currentTenantId, error);
             return {
                 success: false,
                 error: error.message
@@ -825,65 +920,67 @@ async toggleDeviceFeature(deviceId, feature) {
         }
     }
 
-    // FIXED: Execute scenario with optimistic updates
-async executeScenarioCompat(selectedDevices, scenarioFeatures) {
-  try {
-    if (!selectedDevices || !Array.isArray(selectedDevices) || selectedDevices.length === 0) {
-      throw new Error('No devices selected');
+    // FIXED: Execute scenario with tenant context and optimistic updates
+    async executeScenarioCompat(selectedDevices, scenarioFeatures) {
+        try {
+            if (!selectedDevices || !Array.isArray(selectedDevices) || selectedDevices.length === 0) {
+                throw new Error('No devices selected');
+            }
+
+            if (!scenarioFeatures || typeof scenarioFeatures !== 'object') {
+                throw new Error('Invalid scenario features');
+            }
+
+            console.log(`🎭 Sending scenario command for tenant ${this.currentTenantId} - waiting for hardware acknowledgments...`);
+            console.log('🎯 Features to update:', scenarioFeatures);
+
+            // Send command with tenant context
+            const result = await this._makeRequest(`${this.backendUrl}/api/iot/scenario`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    deviceIds: selectedDevices,
+                    features: scenarioFeatures,
+                    tenantId: this.currentTenantId
+                }),
+            });
+
+            if (result.success) {
+                const featureList = Object.keys(scenarioFeatures).join(', ');
+                console.log(`✅ Scenario commands sent for tenant ${this.currentTenantId} features: ${featureList}`);
+                return [{
+                    success: true,
+                    message: result.message,
+                    features: scenarioFeatures,
+                    tenantId: this.currentTenantId,
+                    note: 'Commands sent - dashboard will update when devices acknowledge'
+                }];
+            } else {
+                throw new Error(result.message || 'Scenario execution failed');
+            }
+
+        } catch (error) {
+            console.error('❌ Failed to execute scenario for tenant:', this.currentTenantId, error);
+            return [{
+                success: false,
+                message: error.message,
+                error: error,
+                tenantId: this.currentTenantId
+            }];
+        }
     }
 
-    // FIXED: Don't validate all 4 features - allow partial feature objects
-    if (!scenarioFeatures || typeof scenarioFeatures !== 'object') {
-      throw new Error('Invalid scenario features');
-    }
-
-    console.log(`🎭 Sending partial scenario command - waiting for hardware acknowledgments...`);
-    console.log('🎯 Partial features to update:', scenarioFeatures);
-
-    // DON'T do optimistic updates for scenarios - wait for real hardware response
-    // The dashboard will update when devices send acknowledgments on relay/ack
-
-    // Send command with partial features (backend will preserve other features)
-    const result = await this._makeRequest(`${this.backendUrl}/api/iot/scenario`, {
-      method: 'POST',
-      body: JSON.stringify({
-        deviceIds: selectedDevices,
-        features: scenarioFeatures // Send only the features we want to change
-      }),
-    });
-
-    if (result.success) {
-      const featureList = Object.keys(scenarioFeatures).join(', ');
-      console.log(`✅ Partial scenario commands sent for features: ${featureList}`);
-      return [{
-        success: true,
-        message: result.message,
-        features: scenarioFeatures,
-        note: 'Partial commands sent - dashboard will update when devices acknowledge'
-      }];
-    } else {
-      throw new Error(result.message || 'Scenario execution failed');
-    }
-
-  } catch (error) {
-    console.error('❌ Failed to execute partial scenario:', error);
-    return [{
-      success: false,
-      message: error.message,
-      error: error
-    }];
-  }
-}
-
-    // FIXED: Get AWS things with proper error handling
+    // FIXED: Get AWS things with tenant context
     async getAwsThings() {
         try {
+            console.log('☁️ Fetching available AWS things for tenant:', this.currentTenantId);
+
             const result = await this._makeRequest(`${this.backendUrl}/api/iot/available-things`);
             return {
                 success: true,
                 things: result.things || []
             };
         } catch (error) {
+            console.error('❌ Error fetching AWS things for tenant:', this.currentTenantId, error);
             return {
                 success: false,
                 things: [],
@@ -892,12 +989,17 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
         }
     }
 
-    // FIXED: Create group with proper error handling
+    // FIXED: Create group with tenant context
     async createGroup(groupData) {
         try {
+            console.log('📁 Creating group for tenant:', this.currentTenantId, groupData);
+
             const result = await this._makeRequest(`${this.backendUrl}/api/groups`, {
                 method: 'POST',
-                body: JSON.stringify(groupData),
+                body: JSON.stringify({
+                    ...groupData,
+                    tenantId: this.currentTenantId
+                }),
             });
 
             return {
@@ -905,6 +1007,7 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
                 group: result.group
             };
         } catch (error) {
+            console.error('❌ Error creating group for tenant:', this.currentTenantId, error);
             return {
                 success: false,
                 error: error.message
@@ -912,11 +1015,16 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
         }
     }
 
-    // FIXED: Get devices with local cache
+    // FIXED: Get devices with tenant context and local cache
     async getDevices() {
         try {
+            console.log('📋 Getting devices for tenant:', this.currentTenantId);
+
             const result = await this._makeRequest(`${this.backendUrl}/api/iot/things`);
-            const devices = result.devices || [];
+            const devices = (result.devices || []).map(device => ({
+                ...device,
+                tenantId: this.currentTenantId
+            }));
 
             devices.forEach(device => {
                 const validatedDevice = {
@@ -935,7 +1043,7 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
                     },
                     status: device.status || 'offline'
                 };
-                
+
                 this.awsThings.set(device.id, validatedDevice);
                 this.deviceStates.set(device.id, JSON.stringify(validatedDevice));
                 this.lastUpdateTimes.set(device.id, Date.now());
@@ -943,12 +1051,12 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
 
             return devices;
         } catch (error) {
-            console.error('❌ Error fetching devices:', error);
+            console.error('❌ Error fetching devices for tenant:', this.currentTenantId, error);
             return [];
         }
     }
 
-    // Utility methods
+    // Utility methods with tenant awareness
     isConnected() {
         return this.ws && this.ws.readyState === WebSocket.OPEN;
     }
@@ -965,18 +1073,25 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
     }
 
     getAllDevices() {
-        return Array.from(this.awsThings.values());
+        return Array.from(this.awsThings.values()).filter(device =>
+            !this.currentTenantId || device.tenantId === this.currentTenantId
+        );
     }
 
     getDevice(deviceId) {
-        return this.awsThings.get(deviceId);
+        const device = this.awsThings.get(deviceId);
+        // Only return device if it belongs to current tenant
+        if (device && (!this.currentTenantId || device.tenantId === this.currentTenantId)) {
+            return device;
+        }
+        return null;
     }
 
     getDeviceCount() {
-        return this.awsThings.size;
+        return this.getAllDevices().length;
     }
 
-    // FIXED: Get connection statistics
+    // FIXED: Get connection statistics with tenant context
     getConnectionStats() {
         return {
             isConnected: this.isConnected(),
@@ -985,21 +1100,22 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
             lastConnectionTime: this.lastConnectionTime,
             deviceCount: this.getDeviceCount(),
             hasLoadedInitialData: this.hasLoadedInitialData,
-            isInitialized: this.isInitialized
+            isInitialized: this.isInitialized,
+            currentTenantId: this.currentTenantId
         };
     }
 
-    // FIXED: Force reconnection
+    // FIXED: Force reconnection with tenant context
     forceReconnect() {
-        console.log('🔄 Forcing reconnection...');
-        
+        console.log('🔄 Forcing reconnection for tenant:', this.currentTenantId);
+
         if (this.ws) {
             this.ws.close(1000, 'Force reconnect');
         }
-        
+
         this.reconnectAttempts = 0;
         this.connectionState = 'connecting';
-        
+
         setTimeout(() => {
             this._initializeWebSocketStable().catch(error => {
                 console.error('❌ Force reconnection failed:', error);
@@ -1007,32 +1123,46 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
         }, 1000);
     }
 
-    // FIXED: Clear all caches
+    // FIXED: Clear tenant-specific caches
     clearCaches() {
-        console.log('🧹 Clearing all caches...');
-        
+        console.log('🧹 Clearing caches for tenant:', this.currentTenantId);
+
+        // Only clear data for current tenant
+        const tenantDevices = Array.from(this.awsThings.entries())
+            .filter(([deviceId, device]) => device.tenantId === this.currentTenantId);
+
+        tenantDevices.forEach(([deviceId]) => {
+            this.awsThings.delete(deviceId);
+            this.deviceStates.delete(deviceId);
+            this.lastUpdateTimes.delete(deviceId);
+            this.lastDeviceHashes.delete(deviceId);
+            this.statusSyncInProgress.delete(deviceId);
+        });
+
         this.updateThrottleMap.clear();
-        this.lastDeviceHashes.clear();
         this.pendingOperations.clear();
-        this.statusSyncInProgress.clear();
-        
-        console.log('✅ Caches cleared');
+
+        console.log('✅ Tenant caches cleared');
     }
 
-    // FIXED: Get cache statistics
+    // FIXED: Get cache statistics with tenant context
     getCacheStats() {
+        const tenantDeviceCount = this.getAllDevices().length;
+
         return {
             updateThrottleMap: this.updateThrottleMap.size,
             lastDeviceHashes: this.lastDeviceHashes.size,
             pendingOperations: this.pendingOperations.size,
             statusSyncInProgress: this.statusSyncInProgress.size,
             awsThings: this.awsThings.size,
+            tenantDevices: tenantDeviceCount,
             deviceStates: this.deviceStates.size,
-            lastUpdateTimes: this.lastUpdateTimes.size
+            lastUpdateTimes: this.lastUpdateTimes.size,
+            currentTenantId: this.currentTenantId
         };
     }
 
-    // FIXED: Health check
+    // FIXED: Health check with tenant context
     async healthCheck() {
         try {
             const response = await this._makeRequest(`${this.backendUrl}/api/health`);
@@ -1044,7 +1174,11 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
                     state: this.getConnectionState()
                 },
                 cache: this.getCacheStats(),
-                connection: this.getConnectionStats()
+                connection: this.getConnectionStats(),
+                tenant: {
+                    currentTenantId: this.currentTenantId,
+                    deviceCount: this.getDeviceCount()
+                }
             };
         } catch (error) {
             return {
@@ -1053,14 +1187,17 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
                 websocket: {
                     connected: this.isConnected(),
                     state: this.getConnectionState()
+                },
+                tenant: {
+                    currentTenantId: this.currentTenantId
                 }
             };
         }
     }
 
-    // FIXED: Proper disconnect with complete cleanup
+    // FIXED: Proper disconnect with tenant-aware cleanup
     disconnect() {
-        console.log('🔌 Disconnecting real-time service...');
+        console.log('🔌 Disconnecting real-time service for tenant:', this.currentTenantId);
 
         this.isDestroyed = true;
 
@@ -1081,51 +1218,57 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
             this.ws = null;
         }
 
-        // Clear all state
+        // Clear tenant-specific state
+        this.clearCaches();
+
+        // Reset service state
         this.isInitialized = false;
         this.initPromise = null;
         this.connectionState = 'disconnected';
         this.listeners.clear();
-        this.awsThings.clear();
-        this.deviceStates.clear();
-        this.lastUpdateTimes.clear();
-        this.statusSyncInProgress.clear();
-        this.lastDeviceHashes.clear();
-        this.updateThrottleMap.clear();
-        this.pendingOperations.clear();
         this.isLoadingInitialData = false;
         this.hasLoadedInitialData = false;
         this.reconnectAttempts = 0;
         this.connectionAttempts = 0;
-        
+        this.currentTenantId = null;
+
         console.log('✅ Real-time service disconnected');
     }
 
-    // FIXED: Restart service
-    async restart() {
-        console.log('🔄 Restarting real-time service...');
-        
+    // FIXED: Restart service with tenant context
+    async restart(tenantId = null) {
+        console.log('🔄 Restarting real-time service for tenant:', tenantId || this.currentTenantId);
+
+        // Store tenant context
+        const tenant = tenantId || this.currentTenantId;
+
         // Disconnect first
         this.disconnect();
-        
+
         // Reset destroyed flag
         this.isDestroyed = false;
-        
+
+        // Restore tenant context
+        if (tenant) {
+            this.setTenantContext(tenant);
+        }
+
         // Wait a moment
         await new Promise(resolve => setTimeout(resolve, 1000));
-        
+
         // Initialize again
-        return this.initialize();
+        return this.initialize(tenant);
     }
 
-    // FIXED: Debug information
+    // FIXED: Debug information with tenant context
     getDebugInfo() {
         return {
             service: {
                 isInitialized: this.isInitialized,
                 isDestroyed: this.isDestroyed,
                 hasLoadedInitialData: this.hasLoadedInitialData,
-                isLoadingInitialData: this.isLoadingInitialData
+                isLoadingInitialData: this.isLoadingInitialData,
+                currentTenantId: this.currentTenantId
             },
             connection: this.getConnectionStats(),
             cache: this.getCacheStats(),
@@ -1136,29 +1279,34 @@ async executeScenarioCompat(selectedDevices, scenarioFeatures) {
             timers: {
                 heartbeatActive: !!this.heartbeatInterval,
                 reconnectPending: !!this.reconnectTimeoutId
+            },
+            tenant: {
+                currentTenantId: this.currentTenantId,
+                deviceCount: this.getDeviceCount(),
+                devices: this.getAllDevices().map(d => ({ id: d.id, name: d.name, status: d.status }))
             }
         };
     }
 }
 
-// FIXED: Create singleton instance
+// FIXED: Create singleton instance with multi-tenant support
 const realTimeService = new RealTimeService();
 
 // FIXED: Add global error handlers for better debugging
 if (typeof window !== 'undefined') {
     window.realTimeService = realTimeService;
-    
+
     // Add unload handler to clean up
     window.addEventListener('beforeunload', () => {
         realTimeService.disconnect();
     });
-    
+
     // Add visibility change handler to manage connections
     document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
-            console.log('🌙 Page hidden - maintaining connection');
+            console.log('🌙 Page hidden - maintaining connection for tenant:', realTimeService.currentTenantId);
         } else {
-            console.log('☀️ Page visible - checking connection');
+            console.log('☀️ Page visible - checking connection for tenant:', realTimeService.currentTenantId);
             if (!realTimeService.isConnected() && realTimeService.isInitialized) {
                 realTimeService.forceReconnect();
             }

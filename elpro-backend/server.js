@@ -1,1663 +1,3 @@
-// const express = require('express');
-// const cors = require('cors');
-// const http = require('http');
-// const AWS = require('aws-sdk');
-// const mqtt = require('mqtt');
-// const WebSocket = require('ws');
-// const { v4: uuidv4 } = require('uuid');
-// const fs = require('fs');
-// const path = require('path');
-// require('dotenv').config();
-
-// const app = express();
-// const server = http.createServer(app);
-// const PORT = process.env.PORT || 5000;
-// const WS_PORT = process.env.WS_PORT || 5001;
-
-// // Enhanced CORS configuration
-// app.use(cors({
-//   origin: [
-//     'http://localhost:3000',
-//     'http://localhost:3001',
-//     'http://127.0.0.1:3000',
-//     'http://localhost:3002'
-//   ],
-//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-//   allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with'],
-//   credentials: true,
-//   optionsSuccessStatus: 200
-// }));
-
-// app.use(express.json({ limit: '10mb' }));
-// app.use(express.urlencoded({ extended: true }));
-
-// // Configure AWS
-// AWS.config.update({
-//   region: process.env.AWS_REGION || 'ap-south-1',
-//   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-//   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
-// });
-
-// const iot = new AWS.Iot();
-// let iotData = null;
-// let iotEndpoint = null;
-// let shadowClient = null;
-
-// // WebSocket server
-// const wss = new WebSocket.Server({ port: WS_PORT });
-// const clients = new Set();
-
-// // MQTT client
-// let mqttClient = null;
-// let awsConnectionStatus = 'disconnected';
-// let mqttConnectionStatus = 'disconnected';
-
-// // Enhanced in-memory storage
-// const awsThings = new Map();
-// const deviceStatus = new Map();
-// const groups = new Map();
-// const statusHistory = [];
-
-// // FIXED: Proper MQTT topic tracking and subscription management
-// const subscribedTopics = new Set();
-// const deviceLastSeen = new Map();
-// const deviceHeartbeat = new Map();
-
-// // State tracking for change detection
-// const deviceStateHashes = new Map();
-// const lastBroadcastTimes = new Map();
-
-// // FIXED: Enhanced broadcast function with proper message structure
-// function broadcast(message) {
-//   if (!message || !message.type) {
-//     console.warn('⚠️ Invalid broadcast message:', message);
-//     return;
-//   }
-
-//   message.timestamp = message.timestamp || new Date().toISOString();
-
-//   const messageStr = JSON.stringify(message);
-//   let sentCount = 0;
-
-//   clients.forEach(client => {
-//     if (client.readyState === WebSocket.OPEN) {
-//       try {
-//         client.send(messageStr);
-//         sentCount++;
-//       } catch (error) {
-//         console.error('❌ Error broadcasting to client:', error);
-//         clients.delete(client);
-//       }
-//     } else {
-//       clients.delete(client);
-//     }
-//   });
-
-//   if (sentCount > 0) {
-//     console.log(`📢 Broadcasted ${message.type} to ${sentCount} clients - Device: ${message.deviceId || 'N/A'}`);
-//   }
-// }
-
-// // FIXED: Proper relay-to-feature mapping with validation
-// function mapRelayStatesToFeatures(device, relayStates) {
-//   try {
-//     const relayConfig = device.relayConfig || {
-//       relay1: 'siren',
-//       relay2: 'beacon',
-//       relay3: 'announcement',
-//       relay4: 'dispenser'
-//     };
-
-//     const features = {
-//       siren: false,
-//       beacon: false,
-//       announcement: false,
-//       dispenser: false
-//     };
-
-//     // Map relay states to features
-//     Object.entries(relayConfig).forEach(([relay, feature]) => {
-//       if (relayStates[relay] === true) {
-//         features[feature] = true;
-//       }
-//     });
-
-//     return {
-//       ...device,
-//       features,
-//       relayStates,
-//       relayConfig,
-//       status: 'online', // Device is responding
-//       lastSeen: new Date().toLocaleTimeString(),
-//       lastUpdateTime: new Date().toISOString()
-//     };
-//   } catch (error) {
-//     console.error('❌ Error mapping relay states:', error);
-//     return device;
-//   }
-// }
-
-// // FIXED: Enhanced shadow loading with proper error handling
-// async function loadDeviceStatusFromShadow(deviceId) {
-//   try {
-//     if (!shadowClient) {
-//       console.warn('⚠️ Shadow client not initialized');
-//       return null;
-//     }
-
-//     console.log(`📊 Fetching shadow for device: ${deviceId}`);
-    
-//     const shadowData = await shadowClient.getThingShadow({
-//       thingName: deviceId
-//     }).promise();
-
-//     const shadowPayload = JSON.parse(shadowData.payload);
-//     console.log(`📋 Shadow data for ${deviceId}:`, shadowPayload);
-
-//     // Process both reported and desired states
-//     let relayStates = null;
-
-//     // Prefer reported state, fallback to desired
-//     if (shadowPayload.state && shadowPayload.state.reported) {
-//       const reported = shadowPayload.state.reported;
-//       relayStates = {
-//         relay1: Boolean(reported.relay1),
-//         relay2: Boolean(reported.relay2),
-//         relay3: Boolean(reported.relay3),
-//         relay4: Boolean(reported.relay4)
-//       };
-//       console.log(`📡 Using reported shadow state for ${deviceId}:`, relayStates);
-//     } else if (shadowPayload.state && shadowPayload.state.desired) {
-//       const desired = shadowPayload.state.desired;
-//       relayStates = {
-//         relay1: Boolean(desired.relay1),
-//         relay2: Boolean(desired.relay2),
-//         relay3: Boolean(desired.relay3),
-//         relay4: Boolean(desired.relay4)
-//       };
-//       console.log(`📡 Using desired shadow state for ${deviceId}:`, relayStates);
-//     }
-
-//     if (relayStates) {
-//       // Update device status with shadow data
-//       processDeviceStatusUpdate(deviceId, {
-//         ...relayStates,
-//         signal_strength: 85,
-//         battery_level: 100,
-//         timestamp: new Date().toISOString(),
-//         source: 'shadow_fetch'
-//       });
-
-//       return relayStates;
-//     } else {
-//       console.log(`📋 No state found in shadow for ${deviceId}`);
-//       return null;
-//     }
-//   } catch (error) {
-//     console.warn(`⚠️ Failed to load shadow for ${deviceId}:`, error.message);
-    
-//     // If shadow doesn't exist, create initial state
-//     if (error.code === 'ResourceNotFoundException') {
-//       await createInitialShadow(deviceId);
-//     }
-    
-//     return null;
-//   }
-// }
-
-// // FIXED: Create initial shadow for new devices
-// async function createInitialShadow(deviceId) {
-//   try {
-//     const initialState = {
-//       state: {
-//         desired: {
-//           relay1: false,
-//           relay2: false,
-//           relay3: false,
-//           relay4: false
-//         }
-//       }
-//     };
-
-//     await shadowClient.updateThingShadow({
-//       thingName: deviceId,
-//       payload: JSON.stringify(initialState)
-//     }).promise();
-
-//     console.log(`✅ Created initial shadow for ${deviceId}`);
-//   } catch (error) {
-//     console.warn(`⚠️ Failed to create initial shadow for ${deviceId}:`, error.message);
-//   }
-// }
-
-// // FIXED: Enhanced device status processing with proper validation
-// function processDeviceStatusUpdate(thingName, data) {
-//   try {
-//     console.log(`🔄 Processing status update for ${thingName}:`, data);
-
-//     if (!awsThings.has(thingName)) {
-//       console.log(`⚠️ Received status for unknown thing: ${thingName}`);
-//       return;
-//     }
-
-//     const device = awsThings.get(thingName);
-
-//     // Create the new relay states with proper validation
-//     const newRelayStates = {
-//       relay1: Boolean(data.relay1),
-//       relay2: Boolean(data.relay2),
-//       relay3: Boolean(data.relay3),
-//       relay4: Boolean(data.relay4)
-//     };
-
-//     // Update device with new data
-//     const updatedDevice = mapRelayStatesToFeatures(device, newRelayStates);
-//     updatedDevice.signalStrength = data.signal_strength || device.signalStrength || 85;
-//     updatedDevice.batteryLevel = data.battery_level || device.batteryLevel || 100;
-//     updatedDevice.status = 'online'; // Device is responding
-//     updatedDevice.lastSeen = new Date().toLocaleTimeString();
-//     updatedDevice.lastUpdateTime = data.timestamp || new Date().toISOString();
-
-//     // Update last seen tracking
-//     deviceLastSeen.set(thingName, Date.now());
-
-//     // Store updated device
-//     awsThings.set(thingName, updatedDevice);
-//     deviceStatus.set(thingName, {
-//       ...updatedDevice,
-//       lastUpdateTime: new Date().toISOString()
-//     });
-
-//     console.log(`📢 Broadcasting status update for ${thingName}`, updatedDevice.features);
-    
-//     // Broadcast status update
-//     broadcast({
-//       type: 'device_status_update',
-//       deviceId: thingName,
-//       device: updatedDevice,
-//       timestamp: new Date().toISOString(),
-//       source: data.source || 'status_update'
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error processing device status update:', error);
-//   }
-// }
-
-// // FIXED: Proper MQTT initialization with comprehensive subscriptions
-// function initializeMQTT() {
-//   try {
-//     console.log('🔌 Initializing MQTT connection...');
-
-//     // Load certificates from files
-//     const privateKeyPath = process.env.AWS_IOT_PRIVATE_KEY_PATH || './certs/pri.pem.key';
-//     const certificatePath = process.env.AWS_IOT_CERTIFICATE_PATH || './certs/certi.pem.crt';
-//     const caCertificatePath = process.env.AWS_IOT_CA_CERTIFICATE_PATH || './certs/AmazonRootCA1.pem';
-
-//     let privateKey, certificate, caCertificate;
-
-//     try {
-//       privateKey = fs.readFileSync(privateKeyPath, 'utf8');
-//       certificate = fs.readFileSync(certificatePath, 'utf8');
-//       caCertificate = fs.readFileSync(caCertificatePath, 'utf8');
-//       console.log('✅ Loaded MQTT certificates from files');
-//     } catch (fileError) {
-//       console.log('📄 Certificate files not found, trying environment variables...');
-      
-//       // Fallback to environment variables
-//       privateKey = process.env.AWS_IOT_PRIVATE_KEY ? 
-//         process.env.AWS_IOT_PRIVATE_KEY.replace(/\\n/g, '\n') : null;
-//       certificate = process.env.AWS_IOT_CERTIFICATE ? 
-//         process.env.AWS_IOT_CERTIFICATE.replace(/\\n/g, '\n') : null;
-//       caCertificate = process.env.AWS_IOT_CA_CERTIFICATE ? 
-//         process.env.AWS_IOT_CA_CERTIFICATE.replace(/\\n/g, '\n') : null;
-
-//       if (!privateKey || !certificate || !caCertificate) {
-//         throw new Error('MQTT certificates not found in files or environment variables');
-//       }
-//       console.log('✅ Loaded MQTT certificates from environment variables');
-//     }
-
-//     const mqttUrl = `mqtts://${iotEndpoint}:8883`;
-
-//     mqttClient = mqtt.connect(mqttUrl, {
-//       clientId: `elpro-backend-${Date.now()}`,
-//       clean: true,
-//       connectTimeout: 30000,
-//       reconnectPeriod: 5000,
-//       protocol: 'mqtts',
-//       key: Buffer.from(privateKey, 'utf8'),
-//       cert: Buffer.from(certificate, 'utf8'),
-//       ca: Buffer.from(caCertificate, 'utf8'),
-//       rejectUnauthorized: true
-//     });
-
-//     mqttClient.on('connect', () => {
-//       console.log('✅ MQTT connected - Real-time updates active');
-//       mqttConnectionStatus = 'connected';
-
-//       // Subscribe to wildcard status topics for all devices
-//       const statusTopicPattern = '+/relay/status';
-//       mqttClient.subscribe(statusTopicPattern, (err) => {
-//         if (err) {
-//           console.error('❌ Failed to subscribe to status topics:', err);
-//         } else {
-//           console.log(`📡 Subscribed to MQTT pattern: ${statusTopicPattern}`);
-//           subscribedTopics.add(statusTopicPattern);
-//         }
-//       });
-
-//       // Subscribe to existing devices
-//       subscribeToAllDevices();
-
-//       broadcastConnectionStatus();
-//     });
-
-//     mqttClient.on('message', (topic, message) => {
-//       try {
-//         const data = JSON.parse(message.toString());
-//         const topicParts = topic.split('/');
-
-//         console.log(`📡 MQTT message received on ${topic}:`, data);
-
-//         if (topicParts.length === 3 && topicParts[1] === 'relay') {
-//           const deviceId = topicParts[0];
-//           const messageType = topicParts[2]; // 'status' or 'control'
-
-//           if (messageType === 'status') {
-//             // Real device status update
-//             console.log(`📡 Real-time MQTT status from ${deviceId}:`, data);
-//             processDeviceStatusUpdate(deviceId, {
-//               ...data,
-//               timestamp: new Date().toISOString(),
-//               source: 'mqtt_device_status'
-//             });
-//           } else if (messageType === 'control') {
-//             // Command acknowledgment
-//             console.log(`📤 MQTT control acknowledgment from ${deviceId}:`, data);
-//           }
-//         }
-//       } catch (error) {
-//         console.error('❌ Error processing MQTT message:', error);
-//       }
-//     });
-
-//     mqttClient.on('error', (error) => {
-//       console.error('❌ MQTT connection error:', error);
-//       mqttConnectionStatus = 'error';
-//       broadcastConnectionStatus();
-//     });
-
-//     mqttClient.on('close', () => {
-//       console.log('🔌 MQTT connection closed');
-//       mqttConnectionStatus = 'disconnected';
-//       broadcastConnectionStatus();
-//     });
-
-//     mqttClient.on('reconnect', () => {
-//       console.log('🔄 MQTT reconnecting...');
-//       mqttConnectionStatus = 'connecting';
-//       broadcastConnectionStatus();
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Failed to initialize MQTT:', error);
-//     mqttConnectionStatus = 'error';
-    
-//     // Continue without MQTT but use shadow polling
-//     console.log('🔄 Continuing with shadow polling instead of MQTT...');
-//     startShadowPollingForAllDevices();
-//   }
-// }
-
-// // FIXED: Subscribe to status topics for individual devices
-// function subscribeToDeviceTopics(deviceId) {
-//   if (!mqttClient || !mqttClient.connected) {
-//     console.log(`⚠️ MQTT not connected, cannot subscribe to ${deviceId} topics`);
-//     return;
-//   }
-
-//   const statusTopic = `${deviceId}/relay/status`;
-//   const controlTopic = `${deviceId}/relay/control`;
-
-//   if (!subscribedTopics.has(statusTopic)) {
-//     mqttClient.subscribe(statusTopic, (err) => {
-//       if (err) {
-//         console.error(`❌ Failed to subscribe to ${statusTopic}:`, err);
-//       } else {
-//         console.log(`📡 Subscribed to device status: ${statusTopic}`);
-//         subscribedTopics.add(statusTopic);
-//       }
-//     });
-//   }
-
-//   if (!subscribedTopics.has(controlTopic)) {
-//     mqttClient.subscribe(controlTopic, (err) => {
-//       if (err) {
-//         console.error(`❌ Failed to subscribe to ${controlTopic}:`, err);
-//       } else {
-//         console.log(`📡 Subscribed to device control: ${controlTopic}`);
-//         subscribedTopics.add(controlTopic);
-//       }
-//     });
-//   }
-// }
-
-// // FIXED: Subscribe to all registered devices
-// function subscribeToAllDevices() {
-//   console.log('📡 Subscribing to all registered device topics...');
-  
-//   awsThings.forEach((device, deviceId) => {
-//     subscribeToDeviceTopics(deviceId);
-//   });
-// }
-
-// // FIXED: Start shadow polling as fallback
-// function startShadowPollingForAllDevices() {
-//   console.log('🔄 Starting shadow polling for all devices (MQTT fallback)...');
-  
-//   awsThings.forEach((device, deviceId) => {
-//     startShadowPolling(deviceId);
-//   });
-// }
-
-// function startShadowPolling(deviceId) {
-//   // Initial fetch
-//   setTimeout(() => {
-//     loadDeviceStatusFromShadow(deviceId);
-//   }, 1000);
-
-//   // Polling interval (only if MQTT is not working)
-//   if (mqttConnectionStatus !== 'connected') {
-//     const interval = setInterval(async () => {
-//       if (!awsThings.has(deviceId)) {
-//         clearInterval(interval);
-//         return;
-//       }
-
-//       try {
-//         await loadDeviceStatusFromShadow(deviceId);
-//       } catch (error) {
-//         console.warn(`⚠️ Shadow polling failed for ${deviceId}:`, error.message);
-//       }
-//     }, 15000); // Poll every 15 seconds as fallback
-//   }
-// }
-
-// // FIXED: Enhanced startup process
-// async function initializeAWSConnection() {
-//   try {
-//     console.log('🔍 Initializing AWS IoT connection...');
-
-//     // Get IoT endpoint
-//     if (process.env.AWS_IOT_ENDPOINT) {
-//       iotEndpoint = process.env.AWS_IOT_ENDPOINT;
-//     } else {
-//       const result = await iot.describeEndpoint({ endpointType: 'iot:Data-ATS' }).promise();
-//       iotEndpoint = result.endpointAddress;
-//     }
-
-//     // Initialize IoT Data and Shadow clients
-//     iotData = new AWS.IotData({ endpoint: `https://${iotEndpoint}` });
-//     shadowClient = new AWS.IotData({ endpoint: `https://${iotEndpoint}` });
-
-//     // Test connection
-//     await testAWSConnection();
-
-//     awsConnectionStatus = 'connected';
-//     console.log('✅ AWS IoT connection established');
-
-//     // Load existing registered things from AWS
-//     await loadExistingThings();
-
-//     // Initialize MQTT for real-time updates
-//     initializeMQTT();
-
-//     // Broadcast connection status
-//     broadcastConnectionStatus();
-
-//   } catch (error) {
-//     console.error('❌ Failed to initialize AWS IoT:', error.message);
-//     awsConnectionStatus = 'error';
-//     broadcastConnectionStatus();
-
-//     // Even if AWS fails, start the server for local testing
-//     console.log('🚀 Starting server in local mode...');
-//   }
-// }
-
-// async function testAWSConnection() {
-//   await iot.listThings({ maxResults: 1 }).promise();
-//   console.log('✅ AWS IoT connection test successful');
-// }
-
-// // FIXED: Load existing things with immediate status fetching
-// async function loadExistingThings() {
-//   try {
-//     console.log('📋 Loading existing AWS IoT Things...');
-//     const result = await iot.listThings().promise();
-
-//     let registeredCount = 0;
-//     for (const thing of result.things) {
-//       const isRegistered = thing.attributes?.registered === 'true';
-
-//       if (isRegistered) {
-//         const deviceData = createDeviceFromThing(thing);
-
-//         // Store device data
-//         awsThings.set(thing.thingName, deviceData);
-//         deviceStatus.set(thing.thingName, {
-//           ...deviceData,
-//           lastUpdateTime: new Date().toISOString()
-//         });
-
-//         registeredCount++;
-
-//         // FIXED: Load initial status from shadow immediately
-//         setTimeout(async () => {
-//           await loadDeviceStatusFromShadow(thing.thingName);
-          
-//           // Subscribe to MQTT topics if connected
-//           if (mqttClient && mqttClient.connected) {
-//             subscribeToDeviceTopics(thing.thingName);
-//           }
-//         }, registeredCount * 500); // Stagger the fetches
-//       }
-//     }
-
-//     console.log(`✅ Loaded ${registeredCount} registered devices from AWS`);
-
-//   } catch (error) {
-//     console.error('❌ Error loading existing things:', error);
-//   }
-// }
-
-// // Create device from thing with proper defaults
-// function createDeviceFromThing(thing) {
-//   let relayConfig;
-//   try {
-//     relayConfig = thing.attributes?.relayConfig ?
-//       JSON.parse(thing.attributes.relayConfig) : {
-//         relay1: 'siren',
-//         relay2: 'beacon',
-//         relay3: 'announcement',
-//         relay4: 'dispenser'
-//       };
-//   } catch (error) {
-//     relayConfig = {
-//       relay1: 'siren',
-//       relay2: 'beacon',
-//       relay3: 'announcement',
-//       relay4: 'dispenser'
-//     };
-//   }
-
-//   return {
-//     id: thing.thingName,
-//     name: thing.attributes?.displayName || thing.thingName,
-//     location: thing.attributes?.location || '',
-//     lat: parseFloat(thing.attributes?.latitude || '12.9716'),
-//     lng: parseFloat(thing.attributes?.longitude || '77.5946'),
-//     group: thing.attributes?.group || null,
-//     status: 'offline', // Start as offline until we get real status
-//     features: {
-//       siren: false,
-//       beacon: false,
-//       announcement: false,
-//       dispenser: false
-//     },
-//     relayStates: {
-//       relay1: false,
-//       relay2: false,
-//       relay3: false,
-//       relay4: false
-//     },
-//     relayConfig,
-//     created: new Date().toISOString(),
-//     lastSeen: 'Never',
-//     signalStrength: 0,
-//     batteryLevel: 100,
-//     thingArn: thing.thingArn,
-//     thingTypeName: thing.thingTypeName,
-//     version: thing.version
-//   };
-// }
-
-// // FIXED: WebSocket client handling with enhanced connection status
-// wss.on('connection', (ws) => {
-//   console.log('🔗 Client connected via WebSocket');
-//   clients.add(ws);
-
-//   // Send immediate connection status
-//   const connectionData = {
-//     type: 'connection_status',
-//     status: awsConnectionStatus,
-//     mqttConnected: mqttClient?.connected || false,
-//     endpoint: iotEndpoint || 'Not configured',
-//     timestamp: new Date().toISOString()
-//   };
-
-//   try {
-//     ws.send(JSON.stringify(connectionData));
-//   } catch (error) {
-//     console.warn('Failed to send connection status to new client:', error);
-//   }
-
-//   // Send current device states immediately
-//   setTimeout(() => {
-//     console.log(`📤 Sending ${awsThings.size} device states to new client`);
-//     let sentCount = 0;
-
-//     awsThings.forEach((device, deviceId) => {
-//       try {
-//         const deviceMessage = {
-//           type: 'device_status_update',
-//           deviceId,
-//           device,
-//           timestamp: new Date().toISOString(),
-//           source: 'initial_sync'
-//         };
-//         ws.send(JSON.stringify(deviceMessage));
-//         sentCount++;
-//       } catch (error) {
-//         console.warn(`Failed to send device ${deviceId} to client:`, error);
-//       }
-//     });
-
-//     console.log(`✅ Sent ${sentCount} device states to new client`);
-//   }, 500);
-
-//   ws.on('message', (message) => {
-//     try {
-//       const data = JSON.parse(message);
-//       if (data.type === 'ping') {
-//         ws.send(JSON.stringify({
-//           type: 'pong',
-//           timestamp: new Date().toISOString()
-//         }));
-//       }
-//     } catch (error) {
-//       console.warn('⚠️ Invalid WebSocket message:', error);
-//     }
-//   });
-
-//   ws.on('close', () => {
-//     console.log('🔌 WebSocket client disconnected');
-//     clients.delete(ws);
-//   });
-
-//   ws.on('error', (error) => {
-//     console.error('❌ WebSocket error:', error);
-//     clients.delete(ws);
-//   });
-// });
-
-// function broadcastConnectionStatus() {
-//   broadcast({
-//     type: 'connection_status',
-//     status: awsConnectionStatus,
-//     mqttConnected: mqttClient?.connected || false,
-//     endpoint: iotEndpoint || 'Not configured'
-//   });
-// }
-
-// // API Routes
-
-// app.get('/api/health', (req, res) => {
-//   const onlineDevices = Array.from(awsThings.values()).filter(d => d.status === 'online').length;
-//   const activeDevices = Array.from(awsThings.values()).filter(d => d.status === 'active').length;
-//   const offlineDevices = Array.from(awsThings.values()).filter(d => d.status === 'offline').length;
-
-//   res.json({
-//     status: 'healthy',
-//     timestamp: new Date().toISOString(),
-//     aws: awsConnectionStatus,
-//     mqtt: mqttClient?.connected || false,
-//     endpoint: iotEndpoint || 'Not configured',
-//     things: awsThings.size,
-//     clients: clients.size,
-//     deviceStats: {
-//       total: awsThings.size,
-//       online: onlineDevices,
-//       active: activeDevices,
-//       offline: offlineDevices
-//     },
-//     lastActivity: statusHistory.length > 0 ? statusHistory[0].timestamp : null
-//   });
-// });
-
-// // FIXED: Register thing with immediate status fetching and MQTT subscription
-// app.post('/api/iot/register-thing', async (req, res) => {
-//   try {
-//     const { thingName, name, location, lat, lng, group, relayConfig } = req.body;
-
-//     if (!thingName) {
-//       return res.status(400).json({
-//         success: false,
-//         error: 'Thing name is required'
-//       });
-//     }
-
-//     // Check if thing exists in AWS
-//     let awsThing;
-//     try {
-//       awsThing = await iot.describeThing({ thingName }).promise();
-//     } catch (error) {
-//       return res.status(404).json({
-//         success: false,
-//         error: 'Thing not found in AWS IoT Core'
-//       });
-//     }
-
-//     if (awsThings.has(thingName)) {
-//       return res.status(409).json({
-//         success: false,
-//         error: 'Thing already registered'
-//       });
-//     }
-
-//     const finalRelayConfig = relayConfig || {
-//       relay1: 'siren',
-//       relay2: 'beacon',
-//       relay3: 'announcement',
-//       relay4: 'dispenser'
-//     };
-
-//     // Update thing attributes in AWS
-//     try {
-//       await iot.updateThing({
-//         thingName,
-//         attributePayload: {
-//           attributes: {
-//             ...awsThing.attributes,
-//             displayName: name || thingName,
-//             location: location || '',
-//             latitude: String(lat || 12.9716),
-//             longitude: String(lng || 77.5946),
-//             group: group || '',
-//             registered: 'true',
-//             registeredAt: new Date().toISOString(),
-//             relayConfig: JSON.stringify(finalRelayConfig)
-//           }
-//         }
-//       }).promise();
-//     } catch (updateError) {
-//       console.warn('⚠️ Failed to update thing attributes:', updateError.message);
-//     }
-
-//     // Create device data structure
-//     const deviceData = {
-//       id: thingName,
-//       name: name || thingName,
-//       location: location || '',
-//       lat: lat || 12.9716,
-//       lng: lng || 77.5946,
-//       group: group || null,
-//       status: 'offline', // Start as offline until we get real status
-//       features: {
-//         siren: false,
-//         beacon: false,
-//         announcement: false,
-//         dispenser: false
-//       },
-//       relayStates: {
-//         relay1: false,
-//         relay2: false,
-//         relay3: false,
-//         relay4: false
-//       },
-//       relayConfig: finalRelayConfig,
-//       created: new Date().toISOString(),
-//       lastSeen: 'Never',
-//       signalStrength: 0,
-//       batteryLevel: 100,
-//       thingArn: awsThing.thingArn,
-//       thingTypeName: awsThing.thingTypeName,
-//       version: awsThing.version,
-//       lastUpdateTime: new Date().toISOString()
-//     };
-
-//     // Store in memory
-//     awsThings.set(thingName, deviceData);
-//     deviceStatus.set(thingName, {
-//       ...deviceData,
-//       lastUpdateTime: new Date().toISOString()
-//     });
-
-//     // FIXED: Immediate status fetching and MQTT subscription
-//     setTimeout(async () => {
-//       console.log(`🔄 Starting immediate status sync for newly registered device: ${thingName}`);
-      
-//       // Try to load initial status from shadow
-//       await loadDeviceStatusFromShadow(thingName);
-      
-//       // Subscribe to MQTT topics if connected
-//       if (mqttClient && mqttClient.connected) {
-//         subscribeToDeviceTopics(thingName);
-//       } else {
-//         // Start shadow polling as fallback
-//         startShadowPolling(thingName);
-//       }
-//     }, 1000);
-
-//     // Broadcast device registration
-//     broadcast({
-//       type: 'device_created',
-//       device: deviceData,
-//       timestamp: new Date().toISOString()
-//     });
-
-//     res.status(201).json({
-//       success: true,
-//       message: 'AWS IoT Thing registered successfully - Status fetching started',
-//       device: deviceData
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error registering thing:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to register thing',
-//       message: error.message
-//     });
-//   }
-// });
-
-// // Additional API routes remain the same...
-// app.get('/api/iot/available-things', async (req, res) => {
-//   try {
-//     const result = await iot.listThings().promise();
-
-//     const thingsList = result.things
-//       .filter(thing => !awsThings.has(thing.thingName))
-//       .map(thing => ({
-//         thingName: thing.thingName,
-//         thingArn: thing.thingArn,
-//         attributes: thing.attributes || {},
-//         creationDate: thing.creationDate,
-//         isRegistered: false
-//       }));
-
-//     res.json({
-//       success: true,
-//       things: thingsList
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error listing available things:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to list available things',
-//       message: error.message,
-//       things: []
-//     });
-//   }
-// });
-
-// app.get('/api/iot/things', async (req, res) => {
-//   try {
-//     // Return current device list with real-time status
-//     const deviceList = Array.from(awsThings.values()).map(device => ({
-//       ...device,
-//       // Ensure all required fields are present
-//       features: device.features || {
-//         siren: false,
-//         beacon: false,
-//         announcement: false,
-//         dispenser: false
-//       },
-//       status: device.status || 'offline',
-//       lastSeen: device.lastSeen || 'Never',
-//       lastUpdateTime: device.lastUpdateTime || new Date().toISOString()
-//     }));
-
-//     res.json({
-//       success: true,
-//       devices: deviceList,
-//       timestamp: new Date().toISOString(),
-//       count: deviceList.length
-//     });
-//   } catch (error) {
-//     console.error('❌ Error listing devices:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to list devices',
-//       message: error.message,
-//       devices: []
-//     });
-//   }
-// });
-
-// // FIXED: Delete thing with proper cleanup
-// app.delete('/api/iot/things/:thingName', async (req, res) => {
-//   try {
-//     const thingName = req.params.thingName;
-
-//     // Update AWS thing to remove registered flag
-//     try {
-//       const awsThing = await iot.describeThing({ thingName }).promise();
-//       const newAttributes = { ...awsThing.attributes };
-//       delete newAttributes.registered;
-//       delete newAttributes.registeredAt;
-//       delete newAttributes.displayName;
-
-//       await iot.updateThing({
-//         thingName,
-//         attributePayload: { attributes: newAttributes }
-//       }).promise();
-//     } catch (awsError) {
-//       console.warn('⚠️ AWS update failed:', awsError.message);
-//     }
-
-//     // Unsubscribe from MQTT topics
-//     if (mqttClient && mqttClient.connected) {
-//       const statusTopic = `${thingName}/relay/status`;
-//       const controlTopic = `${thingName}/relay/control`;
-      
-//       mqttClient.unsubscribe(statusTopic);
-//       mqttClient.unsubscribe(controlTopic);
-//       subscribedTopics.delete(statusTopic);
-//       subscribedTopics.delete(controlTopic);
-      
-//       console.log(`📡 Unsubscribed from ${thingName} MQTT topics`);
-//     }
-
-//     // Remove from memory
-//     awsThings.delete(thingName);
-//     deviceStatus.delete(thingName);
-//     deviceStateHashes.delete(thingName);
-//     lastBroadcastTimes.delete(thingName);
-//     deviceLastSeen.delete(thingName);
-//     deviceHeartbeat.delete(thingName);
-
-//     // Broadcast deletion
-//     broadcast({
-//       type: 'device_deleted',
-//       deviceId: thingName,
-//       timestamp: new Date().toISOString()
-//     });
-
-//     res.json({
-//       success: true,
-//       message: 'Device unregistered successfully'
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error deleting device:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to delete device',
-//       message: error.message
-//     });
-//   }
-// });
-
-// // FIXED: Enhanced command sending with immediate shadow update
-// app.post('/api/iot/command', async (req, res) => {
-//   try {
-//     const { deviceId, command, data } = req.body;
-
-//     if (!deviceId || !command) {
-//       return res.status(400).json({
-//         success: false,
-//         error: 'Device ID and command are required'
-//       });
-//     }
-
-//     if (!awsThings.has(deviceId)) {
-//       return res.status(404).json({
-//         success: false,
-//         error: 'Device not found'
-//       });
-//     }
-
-//     const device = awsThings.get(deviceId);
-//     const controlTopic = `${deviceId}/relay/control`;
-
-//     // Start with current relay states
-//     let payload = {
-//       relay1: device.relayStates?.relay1 || false,
-//       relay2: device.relayStates?.relay2 || false,
-//       relay3: device.relayStates?.relay3 || false,
-//       relay4: device.relayStates?.relay4 || false
-//     };
-
-//     // Handle feature toggle commands
-//     if (command.includes('_on') || command.includes('_off') || command.startsWith('toggle_')) {
-//       const feature = command.replace('toggle_', '').replace('_on', '').replace('_off', '');
-
-//       // Find the correct relay for this feature
-//       const relayForFeature = Object.entries(device.relayConfig || {}).find(([relay, configuredFeature]) =>
-//         configuredFeature === feature
-//       );
-
-//       if (relayForFeature) {
-//         const [relayNum] = relayForFeature;
-//         const currentState = device.relayStates?.[relayNum] || false;
-
-//         // Determine new state based on command
-//         let newState;
-//         if (command.includes('_on')) {
-//           newState = true;
-//         } else if (command.includes('_off')) {
-//           newState = false;
-//         } else if (command.includes('toggle')) {
-//           newState = !currentState;
-//         }
-
-//         // ONLY update the specific relay for this feature
-//         payload[relayNum] = newState;
-
-//         console.log(`🎛️ Feature ${feature} mapped to ${relayNum}: ${currentState} → ${newState}`);
-
-//         // Update device state locally for immediate response
-//         const updatedRelayStates = { ...device.relayStates, [relayNum]: newState };
-//         const optimisticDevice = mapRelayStatesToFeatures(device, updatedRelayStates);
-//         awsThings.set(deviceId, optimisticDevice);
-//         deviceStatus.set(deviceId, {
-//           ...optimisticDevice,
-//           lastUpdateTime: new Date().toISOString()
-//         });
-
-//         // Immediate broadcast for instant UI feedback
-//         broadcast({
-//           type: 'device_status_update',
-//           deviceId,
-//           device: optimisticDevice,
-//           timestamp: new Date().toISOString(),
-//           source: 'command_optimistic'
-//         });
-//       } else {
-//         console.warn(`⚠️ No relay mapping found for feature: ${feature}`);
-//       }
-//     }
-
-//     let commandSent = false;
-
-//     // Try MQTT first
-//     if (mqttClient && mqttClient.connected) {
-//       mqttClient.publish(controlTopic, JSON.stringify(payload), (err) => {
-//         if (!err) {
-//           console.log(`📤 Command sent via MQTT to ${controlTopic}:`, payload);
-//           commandSent = true;
-//         }
-//       });
-//     }
-
-//     // Fallback to IoT Data API
-//     if (!commandSent && iotData) {
-//       try {
-//         await iotData.publish({
-//           topic: controlTopic,
-//           payload: JSON.stringify(payload)
-//         }).promise();
-//         console.log(`📤 Command sent via IoT Data API to ${controlTopic}:`, payload);
-//         commandSent = true;
-//       } catch (iotError) {
-//         console.error('❌ IoT Data publish failed:', iotError.message);
-//       }
-//     }
-
-//     // Update device shadow for persistence
-//     if (shadowClient) {
-//       try {
-//         await shadowClient.updateThingShadow({
-//           thingName: deviceId,
-//           payload: JSON.stringify({
-//             state: { desired: payload }
-//           })
-//         }).promise();
-//         console.log(`📋 Device shadow updated for ${deviceId}`);
-//       } catch (shadowError) {
-//         console.warn('⚠️ Failed to update device shadow:', shadowError.message);
-//       }
-//     }
-
-//     // Broadcast command sent
-//     broadcast({
-//       type: 'command_sent',
-//       deviceId,
-//       command,
-//       topic: controlTopic,
-//       payload,
-//       timestamp: new Date().toISOString()
-//     });
-
-//     res.json({
-//       success: true,
-//       message: 'Command sent successfully',
-//       method: commandSent ? (mqttClient?.connected ? 'MQTT' : 'IoT Data') : 'Simulated',
-//       topic: controlTopic,
-//       payload
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error sending command:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to send command',
-//       message: error.message
-//     });
-//   }
-// });
-
-// // FIXED: Enhanced scenario execution
-// app.post('/api/iot/scenario', async (req, res) => {
-//   try {
-//     const { deviceIds, scenario, features } = req.body;
-
-//     if (!deviceIds || !Array.isArray(deviceIds) || deviceIds.length === 0) {
-//       return res.status(400).json({
-//         success: false,
-//         error: 'Device IDs array is required'
-//       });
-//     }
-
-//     // Use features if provided, otherwise use scenario mapping
-//     let targetFeatures;
-
-//     if (features && typeof features === 'object') {
-//       // Use the exact features provided
-//       targetFeatures = {
-//         siren: Boolean(features.siren),
-//         beacon: Boolean(features.beacon),
-//         announcement: Boolean(features.announcement),
-//         dispenser: Boolean(features.dispenser)
-//       };
-//       console.log('🎭 Using provided features:', targetFeatures);
-//     } else {
-//       // Correct scenario feature mapping
-//       const scenarioFeatures = {
-//         'ALL': { siren: true, beacon: true, announcement: true, dispenser: true },
-//         'WAR': { siren: true, beacon: false, announcement: true, dispenser: true },
-//         'FIRE': { siren: true, beacon: true, announcement: true, dispenser: false },
-//         'NATURAL': { siren: true, beacon: true, announcement: true, dispenser: false }
-//       };
-
-//       targetFeatures = scenarioFeatures[scenario] || scenarioFeatures['ALL'];
-//       console.log(`🎭 Using scenario ${scenario} features:`, targetFeatures);
-//     }
-
-//     const results = [];
-
-//     // Send commands to each device
-//     for (const deviceId of deviceIds) {
-//       try {
-//         if (!awsThings.has(deviceId)) {
-//           results.push({ deviceId, success: false, error: 'Device not found' });
-//           continue;
-//         }
-
-//         const device = awsThings.get(deviceId);
-//         const controlTopic = `${deviceId}/relay/control`;
-
-//         // Proper feature to relay mapping
-//         const relayConfig = device.relayConfig || {
-//           relay1: 'siren',
-//           relay2: 'beacon',
-//           relay3: 'announcement',
-//           relay4: 'dispenser'
-//         };
-
-//         // Create reverse mapping: feature -> relay
-//         const featureToRelay = {};
-//         Object.entries(relayConfig).forEach(([relay, feature]) => {
-//           featureToRelay[feature] = relay;
-//         });
-
-//         // Build payload based on target features and device's relay config
-//         const payload = {
-//           relay1: false,
-//           relay2: false,
-//           relay3: false,
-//           relay4: false
-//         };
-
-//         // Set relays based on target features
-//         Object.entries(targetFeatures).forEach(([feature, shouldEnable]) => {
-//           const relayForFeature = featureToRelay[feature];
-//           if (relayForFeature) {
-//             payload[relayForFeature] = Boolean(shouldEnable);
-//             console.log(`🎛️ Feature ${feature} -> ${relayForFeature}: ${shouldEnable}`);
-//           }
-//         });
-
-//         console.log(`📋 Device ${deviceId} relay mapping:`, relayConfig);
-//         console.log(`📋 Device ${deviceId} final payload:`, payload);
-
-//         // Update device state locally for immediate response
-//         const optimisticDevice = mapRelayStatesToFeatures(device, payload);
-//         awsThings.set(deviceId, optimisticDevice);
-//         deviceStatus.set(deviceId, {
-//           ...optimisticDevice,
-//           lastUpdateTime: new Date().toISOString()
-//         });
-
-//         // Immediate broadcast
-//         broadcast({
-//           type: 'device_status_update',
-//           deviceId,
-//           device: optimisticDevice,
-//           timestamp: new Date().toISOString(),
-//           source: 'scenario_execution'
-//         });
-
-//         // Send command
-//         let sent = false;
-//         if (mqttClient && mqttClient.connected) {
-//           mqttClient.publish(controlTopic, JSON.stringify(payload));
-//           console.log(`📤 MQTT command sent to ${deviceId}:`, payload);
-//           sent = true;
-//         } else if (iotData) {
-//           await iotData.publish({
-//             topic: controlTopic,
-//             payload: JSON.stringify(payload)
-//           }).promise();
-//           console.log(`📤 IoT Data command sent to ${deviceId}:`, payload);
-//           sent = true;
-//         }
-
-//         // Update shadow
-//         if (shadowClient) {
-//           try {
-//             await shadowClient.updateThingShadow({
-//               thingName: deviceId,
-//               payload: JSON.stringify({
-//                 state: { desired: payload }
-//               })
-//             }).promise();
-//             console.log(`📋 Shadow updated for ${deviceId}`);
-//           } catch (shadowError) {
-//             console.warn(`⚠️ Failed to update shadow for ${deviceId}:`, shadowError.message);
-//           }
-//         }
-
-//         results.push({
-//           deviceId,
-//           success: true,
-//           method: sent ? 'AWS' : 'Simulated',
-//           topic: controlTopic,
-//           payload,
-//           features: targetFeatures
-//         });
-
-//       } catch (error) {
-//         console.error(`❌ Error executing scenario for device ${deviceId}:`, error);
-//         results.push({ deviceId, success: false, error: error.message });
-//       }
-//     }
-
-//     // Broadcast scenario execution
-//     broadcast({
-//       type: 'scenario_executed',
-//       scenario: {
-//         name: scenario,
-//         features: targetFeatures
-//       },
-//       deviceIds,
-//       results,
-//       timestamp: new Date().toISOString()
-//     });
-
-//     const successful = results.filter(r => r.success).length;
-//     res.json({
-//       success: true,
-//       message: `Scenario executed on ${successful}/${deviceIds.length} devices`,
-//       scenario: scenario,
-//       features: targetFeatures,
-//       devicesAffected: deviceIds.length,
-//       results
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error executing scenario:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to execute scenario',
-//       message: error.message
-//     });
-//   }
-// });
-
-// // FIXED: Manual status sync endpoint
-// app.post('/api/iot/sync-status/:deviceId', async (req, res) => {
-//   try {
-//     const deviceId = req.params.deviceId;
-
-//     if (!awsThings.has(deviceId)) {
-//       return res.status(404).json({
-//         success: false,
-//         error: 'Device not found'
-//       });
-//     }
-
-//     console.log('📊 Manual status sync requested for:', deviceId);
-
-//     // Force immediate status fetch
-//     const statusData = await loadDeviceStatusFromShadow(deviceId);
-
-//     if (statusData) {
-//       const device = awsThings.get(deviceId);
-//       res.json({
-//         success: true,
-//         message: 'Status synced successfully',
-//         device: device,
-//         statusData: statusData
-//       });
-//     } else {
-//       res.json({
-//         success: true,
-//         message: 'Status sync attempted - no data available',
-//         device: awsThings.get(deviceId)
-//       });
-//     }
-
-//   } catch (error) {
-//     console.error('❌ Error in manual status sync:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to sync status',
-//       message: error.message
-//     });
-//   }
-// });
-
-// // Manual status update endpoint for testing
-// app.post('/api/iot/manual-status-update/:deviceId', async (req, res) => {
-//   try {
-//     const deviceId = req.params.deviceId;
-//     const { relay1, relay2, relay3, relay4, signal_strength, battery_level } = req.body;
-
-//     if (!awsThings.has(deviceId)) {
-//       return res.status(404).json({
-//         success: false,
-//         error: 'Device not found'
-//       });
-//     }
-
-//     const statusData = {
-//       relay1: Boolean(relay1),
-//       relay2: Boolean(relay2),
-//       relay3: Boolean(relay3),
-//       relay4: Boolean(relay4),
-//       signal_strength: signal_strength || 85,
-//       battery_level: battery_level || 100
-//     };
-
-//     console.log('📡 Manual status update for:', deviceId, statusData);
-
-//     // Process the status update immediately
-//     processDeviceStatusUpdate(deviceId, statusData);
-
-//     res.json({
-//       success: true,
-//       message: 'Status updated successfully',
-//       deviceId,
-//       statusData
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error in manual status update:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to update status',
-//       message: error.message
-//     });
-//   }
-// });
-
-// // Force status refresh for all devices
-// app.post('/api/iot/refresh-all-status', async (req, res) => {
-//   try {
-//     console.log('🔄 Manual refresh requested for all devices');
-    
-//     const results = [];
-//     const deviceIds = Array.from(awsThings.keys());
-    
-//     for (const deviceId of deviceIds) {
-//       try {
-//         const statusData = await loadDeviceStatusFromShadow(deviceId);
-//         results.push({
-//           deviceId,
-//           success: true,
-//           hasData: !!statusData
-//         });
-//       } catch (error) {
-//         results.push({
-//           deviceId,
-//           success: false,
-//           error: error.message
-//         });
-//       }
-//     }
-
-//     res.json({
-//       success: true,
-//       message: `Status refresh completed for ${deviceIds.length} devices`,
-//       results
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error in refresh all status:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to refresh status',
-//       message: error.message
-//     });
-//   }
-// });
-
-// // Groups API
-// app.get('/api/groups', (req, res) => {
-//   const groupList = Array.from(groups.values());
-//   res.json({
-//     success: true,
-//     groups: groupList
-//   });
-// });
-
-// app.post('/api/groups', (req, res) => {
-//   try {
-//     const { name, description, color, deviceIds } = req.body;
-
-//     if (!name) {
-//       return res.status(400).json({
-//         success: false,
-//         error: 'Group name is required'
-//       });
-//     }
-
-//     const group = {
-//       id: `group-${Date.now()}`,
-//       name,
-//       description: description || '',
-//       color: color || 'blue',
-//       devices: deviceIds || [],
-//       created: new Date().toISOString()
-//     };
-
-//     groups.set(group.id, group);
-
-//     broadcast({
-//       type: 'group_created',
-//       group,
-//       timestamp: new Date().toISOString()
-//     });
-
-//     res.status(201).json({
-//       success: true,
-//       message: 'Group created successfully',
-//       group
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error creating group:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to create group',
-//       message: error.message
-//     });
-//   }
-// });
-
-// // Get system statistics
-// app.get('/api/statistics', (req, res) => {
-//   try {
-//     const stats = {
-//       totalThings: awsThings.size,
-//       onlineThings: Array.from(awsThings.values()).filter(d => d.status === 'online').length,
-//       activeThings: Array.from(awsThings.values()).filter(d => d.status === 'active').length,
-//       offlineThings: Array.from(awsThings.values()).filter(d => d.status === 'offline').length,
-//       totalGroups: groups.size,
-//       mqttConnected: mqttClient ? mqttClient.connected : false,
-//       awsConnectionStatus,
-//       iotEndpoint: iotEndpoint || 'Not configured',
-//       lastStatusUpdate: statusHistory.length > 0 ? statusHistory[0].timestamp : null,
-//       systemUptime: process.uptime(),
-//       connectedClients: clients.size,
-//       subscribedTopics: subscribedTopics.size
-//     };
-
-//     res.json({
-//       success: true,
-//       statistics: stats,
-//       timestamp: new Date().toISOString()
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error getting statistics:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to get statistics',
-//       message: error.message
-//     });
-//   }
-// });
-
-// // Get status history
-// app.get('/api/history', (req, res) => {
-//   try {
-//     const limit = parseInt(req.query.limit) || 50;
-//     const deviceId = req.query.deviceId;
-
-//     let history = statusHistory;
-
-//     if (deviceId) {
-//       history = history.filter(entry => entry.deviceId === deviceId);
-//     }
-
-//     res.json({
-//       success: true,
-//       history: history.slice(0, limit),
-//       total: history.length,
-//       timestamp: new Date().toISOString()
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Error getting history:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to get history',
-//       message: error.message
-//     });
-//   }
-// });
-
-// // Error handling middleware
-// app.use((error, req, res, next) => {
-//   console.error('❌ Unhandled error:', error);
-//   res.status(500).json({
-//     success: false,
-//     error: 'Internal server error',
-//     message: error.message
-//   });
-// });
-
-// // 404 handler
-// app.use((req, res) => {
-//   res.status(404).json({
-//     success: false,
-//     error: 'Not found',
-//     message: `Route ${req.method} ${req.path} not found`
-//   });
-// });
-
-// // Start HTTP server
-// server.listen(PORT, () => {
-//   console.log(`🚀 ELPRO AWS IoT Backend Server running on port ${PORT}`);
-//   console.log(`🌐 WebSocket server running on port ${WS_PORT}`);
-//   console.log(`📡 CORS enabled for frontend connections`);
-
-//   // Initialize AWS connection
-//   initializeAWSConnection();
-
-//   console.log('\n📋 Available API Endpoints:');
-//   console.log('  GET  /api/health - Health check');
-//   console.log('  GET  /api/iot/things - List registered devices');
-//   console.log('  GET  /api/iot/available-things - List unregistered things');
-//   console.log('  POST /api/iot/register-thing - Register existing thing');
-//   console.log('  DELETE /api/iot/things/:thingName - Unregister thing');
-//   console.log('  POST /api/iot/command - Send MQTT command');
-//   console.log('  POST /api/iot/scenario - Execute scenario');
-//   console.log('  POST /api/iot/sync-status/:deviceId - Manual status sync');
-//   console.log('  POST /api/iot/refresh-all-status - Refresh all device status');
-//   console.log('  POST /api/iot/manual-status-update/:deviceId - Manual status update');
-//   console.log('  GET  /api/groups - List groups');
-//   console.log('  POST /api/groups - Create group');
-//   console.log('  GET  /api/statistics - System statistics');
-//   console.log('  GET  /api/history - Status history');
-
-//   console.log('\n🧪 Testing without MQTT:');
-//   console.log('  POST /api/iot/manual-status-update/your-device-id');
-//   console.log('  Body: { "relay1": true, "relay2": false, "relay3": false, "relay4": false }');
-
-//   console.log('\n🎯 FIXED STATUS FETCHING:');
-//   console.log('  ✅ Automatic MQTT subscription for real-time status updates');
-//   console.log('  ✅ Immediate status fetch on device registration');
-//   console.log('  ✅ Shadow polling fallback when MQTT unavailable');
-//   console.log('  ✅ Proper certificate loading from files or environment');
-//   console.log('  ✅ Enhanced error handling and reconnection logic');
-//   console.log('  ✅ Real-time status broadcasting via WebSocket');
-// });
-
-// // Graceful shutdown
-// process.on('SIGINT', () => {
-//   console.log('\n🛑 Shutting down gracefully...');
-
-//   // Close MQTT connection
-//   if (mqttClient) {
-//     console.log('🔌 Disconnecting MQTT client...');
-//     mqttClient.end();
-//   }
-
-//   // Close WebSocket server
-//   wss.close(() => {
-//     console.log('✅ WebSocket server closed');
-//     server.close(() => {
-//       console.log('✅ HTTP server closed');
-//       console.log('👋 ELPRO Backend shutdown complete');
-//       process.exit(0);
-//     });
-//   });
-// });
-
-// process.on('SIGTERM', () => {
-//   console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
-//   process.emit('SIGINT');
-// });
-
-// process.on('uncaughtException', (error) => {
-//   console.error('❌ Uncaught Exception:', error);
-//   process.exit(1);
-// });
-
-// process.on('unhandledRejection', (reason, promise) => {
-//   console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-//   process.exit(1);
-// });
-
-
-
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
@@ -1674,8 +14,6 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const WS_PORT = process.env.WS_PORT || 5001;
 
-
-
 // Enhanced CORS configuration
 app.use(cors({
   origin: [
@@ -1685,7 +23,7 @@ app.use(cors({
     'http://localhost:3002'
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with', 'X-Tenant-ID'],
   credentials: true,
   optionsSuccessStatus: 200
 }));
@@ -1700,224 +38,315 @@ AWS.config.update({
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
 });
 
+// Initialize DynamoDB for multi-tenant data
+const dynamoDb = new AWS.DynamoDB.DocumentClient({
+  region: process.env.AWS_REGION || 'ap-south-1'
+});
+
+// S3 for tenant assets
+const s3 = new AWS.S3({
+  region: process.env.AWS_REGION || 'ap-south-1'
+});
+
+// DynamoDB table names
+const TABLES = {
+  TENANTS: 'elpro-tenants',
+  TENANT_DEVICES: 'elpro-tenant-devices',
+  TENANT_GROUPS: 'elpro-tenant-groups',
+  TENANT_SETTINGS: 'elpro-tenant-settings',
+  TENANT_ACTIVITY: 'elpro-tenant-activity'
+};
+
 const iot = new AWS.Iot();
 let iotData = null;
 let iotEndpoint = null;
 let shadowClient = null;
 
-// WebSocket server
+// WebSocket server with tenant context
 const wss = new WebSocket.Server({ port: WS_PORT });
-const clients = new Set();
+const tenantClients = new Map(); // Map tenant IDs to client sets
 
 // MQTT client
 let mqttClient = null;
 let awsConnectionStatus = 'disconnected';
 let mqttConnectionStatus = 'disconnected';
 
-// Enhanced in-memory storage
-const awsThings = new Map();
-const deviceStatus = new Map();
-const groups = new Map();
-const statusHistory = [];
+// Enhanced in-memory storage with tenant separation
+const tenantAwsThings = new Map(); // tenantId -> Map of devices
+const tenantDeviceStatus = new Map(); // tenantId -> Map of device status
+const tenantGroups = new Map(); // tenantId -> Map of groups
+const tenantStatusHistory = new Map(); // tenantId -> Array of status history
 
-// FIXED: Enhanced device tracking for proper status management
+// FIXED: Enhanced device tracking for proper status management with tenant context
 const subscribedTopics = new Set();
-const deviceLastConnection = new Map(); // When device last sent connection status
-const deviceLastRelayStatus = new Map(); // When device last sent relay status
-const deviceLastAck = new Map(); // When device last sent ack (actual hardware status)
-const deviceConnectedToAWS = new Map(); // Track AWS connectivity
-const statusCheckIntervals = new Map(); // Store interval IDs for cleanup
+const tenantDeviceLastConnection = new Map(); // tenantId -> Map of device -> timestamp
+const tenantDeviceLastRelayStatus = new Map(); // tenantId -> Map of device -> timestamp
+const tenantDeviceLastAck = new Map(); // tenantId -> Map of device -> timestamp
+const tenantDeviceConnectedToAWS = new Map(); // tenantId -> Map of device -> boolean
+const tenantStatusCheckIntervals = new Map(); // tenantId -> Map of device -> intervalId
 
-// FIXED: Constants for status timing based on your requirements
-// FIXED: Add proper timeout constants
+// FIXED: Constants for status timing
 const OFFLINE_TIMEOUT = 20 * 60 * 1000; // 20 minutes
 const RELAY_STATUS_TIMEOUT = 2 * 60 * 1000; // 2 minutes for active status
 const CONNECTION_CHECK_INTERVAL = 10 * 1000;
 const STATUS_CHECK_INTERVAL = 30 * 1000;
 
-// State tracking for change detection
-const deviceStateHashes = new Map();
-const lastBroadcastTimes = new Map();
+// Multi-tenant helper functions
+function getTenantDevices(tenantId) {
+  if (!tenantAwsThings.has(tenantId)) {
+    tenantAwsThings.set(tenantId, new Map());
+  }
+  return tenantAwsThings.get(tenantId);
+}
 
-// FIXED: Enhanced device status calculation based on connection and relay status timing
-// FIXED: Enhanced device status calculation with clear active/online logic
-// FIXED: The device IS sending relay status, so it should be ACTIVE
-// MINIMAL CHANGE: Just replace this function in your backend (paste-2.txt)
-// REVERT: Go back to original calculateDeviceStatus that shows "active" when features are on
-// BACKEND: Modified calculateDeviceStatus to return dual status object
-function calculateDeviceStatus(deviceId) {
+function getTenantDeviceStatus(tenantId) {
+  if (!tenantDeviceStatus.has(tenantId)) {
+    tenantDeviceStatus.set(tenantId, new Map());
+  }
+  return tenantDeviceStatus.get(tenantId);
+}
+
+function getTenantGroups(tenantId) {
+  if (!tenantGroups.has(tenantId)) {
+    tenantGroups.set(tenantId, new Map());
+  }
+  return tenantGroups.get(tenantId);
+}
+
+function getTenantStatusHistory(tenantId) {
+  if (!tenantStatusHistory.has(tenantId)) {
+    tenantStatusHistory.set(tenantId, []);
+  }
+  return tenantStatusHistory.get(tenantId);
+}
+
+function getTenantClients(tenantId) {
+  if (!tenantClients.has(tenantId)) {
+    tenantClients.set(tenantId, new Set());
+  }
+  return tenantClients.get(tenantId);
+}
+
+// Middleware to extract tenant context
+function extractTenantContext(req, res, next) {
+  const tenantId = req.headers['x-tenant-id'] || req.body?.tenantId || req.query?.tenantId;
+  req.tenantId = tenantId;
+  next();
+}
+
+app.use(extractTenantContext);
+
+// FIXED: Enhanced device status calculation with tenant context
+function calculateDeviceStatus(tenantId, deviceId) {
   const now = Date.now();
+
+  // Get tenant-specific maps
+  const deviceLastConnection = tenantDeviceLastConnection.get(tenantId) || new Map();
+  const deviceLastRelayStatus = tenantDeviceLastRelayStatus.get(tenantId) || new Map();
+  const deviceLastAck = tenantDeviceLastAck.get(tenantId) || new Map();
+  const deviceConnectedToAWS = tenantDeviceConnectedToAWS.get(tenantId) || new Map();
+
   const lastConnection = deviceLastConnection.get(deviceId) || 0;
   const lastRelayStatus = deviceLastRelayStatus.get(deviceId) || 0;
   const lastAck = deviceLastAck.get(deviceId) || 0;
   const isConnectedToAWS = deviceConnectedToAWS.get(deviceId) || false;
-  
-  console.log(`📊 Status check for ${deviceId}:`);
+
+  console.log(`📊 Status check for tenant ${tenantId} device ${deviceId}:`);
   console.log(`   - lastConnection: ${new Date(lastConnection).toLocaleTimeString()}`);
   console.log(`   - lastRelayStatus: ${new Date(lastRelayStatus).toLocaleTimeString()}`);
   console.log(`   - lastAck: ${new Date(lastAck).toLocaleTimeString()}`);
   console.log(`   - awsConnected: ${isConnectedToAWS}`);
-  
+
   // OFFLINE: No connection status for more than 20 minutes
   if (now - lastConnection > OFFLINE_TIMEOUT) {
-    console.log(`📴 Device ${deviceId} is OFFLINE - no connection for ${Math.round((now - lastConnection) / 60000)} minutes`);
+    console.log(`📴 Tenant ${tenantId} device ${deviceId} is OFFLINE - no connection for ${Math.round((now - lastConnection) / 60000)} minutes`);
     return 'offline';
   }
-  
+
   // Check if device is connected first
   if (!isConnectedToAWS || (now - lastConnection >= OFFLINE_TIMEOUT)) {
-    console.log(`📴 Device ${deviceId} is OFFLINE - not properly connected`);
+    console.log(`📴 Tenant ${tenantId} device ${deviceId} is OFFLINE - not properly connected`);
     return 'offline';
   }
-  
+
   // Device is connected, now check if any features are active
-  const device = awsThings.get(deviceId);
+  const tenantDevices = getTenantDevices(tenantId);
+  const device = tenantDevices.get(deviceId);
   if (!device) {
-    console.log(`📴 Device ${deviceId} is OFFLINE - not found in registry`);
+    console.log(`📴 Tenant ${tenantId} device ${deviceId} is OFFLINE - not found in registry`);
     return 'offline';
   }
-  
+
   // Check for active features
   const hasActiveFeatures = device.features && Object.values(device.features).some(feature => feature === true);
-  
+
   if (hasActiveFeatures) {
-    console.log(`🟢 Device ${deviceId} is ACTIVE + ONLINE - connected with active features:`, 
+    console.log(`🟢 Tenant ${tenantId} device ${deviceId} is ACTIVE + ONLINE - connected with active features:`,
       Object.entries(device.features || {}).filter(([k, v]) => v).map(([k]) => k).join(', '));
-    // MINIMAL CHANGE: Return "active+online" to show both statuses
     return 'active+online';
   }
-  
+
   // ONLINE: Device is connected but no features are active
-  console.log(`🟡 Device ${deviceId} is ONLINE - connected but no active features`);
+  console.log(`🟡 Tenant ${tenantId} device ${deviceId} is ONLINE - connected but no active features`);
   return 'online';
 }
 
-// FIXED: Update device status with proper feature-based active logic
-// MINIMAL CHANGE: Also replace this function in your backend (paste-2.txt)
-function updateDeviceStatus(deviceId, newStatus = null) {
-  if (!awsThings.has(deviceId)) {
+// FIXED: Update device status with tenant context
+function updateDeviceStatus(tenantId, deviceId, newStatus = null) {
+  const tenantDevices = getTenantDevices(tenantId);
+  if (!tenantDevices.has(deviceId)) {
     return;
   }
-  
-  const device = awsThings.get(deviceId);
-  const calculatedStatus = newStatus || calculateDeviceStatus(deviceId);
-  
+
+  const device = tenantDevices.get(deviceId);
+  const calculatedStatus = newStatus || calculateDeviceStatus(tenantId, deviceId);
+
   // Only update if status actually changed
   if (device.status !== calculatedStatus) {
     const previousStatus = device.status;
-    device.status = calculatedStatus; // This will now always be 'online' when connected
+    device.status = calculatedStatus;
     device.lastStatusChange = new Date().toISOString();
-    
+
     // Update storage
-    awsThings.set(deviceId, device);
-    deviceStatus.set(deviceId, {
+    tenantDevices.set(deviceId, device);
+    const tenantDeviceStatusMap = getTenantDeviceStatus(tenantId);
+    tenantDeviceStatusMap.set(deviceId, {
       ...device,
       lastUpdateTime: new Date().toISOString()
     });
-    
-    console.log(`📊 Device ${deviceId} status changed: ${previousStatus} → ${calculatedStatus}`);
-    
+
+    console.log(`📊 Tenant ${tenantId} device ${deviceId} status changed: ${previousStatus} → ${calculatedStatus}`);
+
     // Log feature states for debugging
     if (device.features) {
       const activeFeatures = Object.entries(device.features).filter(([k, v]) => v).map(([k]) => k);
-      console.log(`🎛️ Device ${deviceId} active features: ${activeFeatures.length > 0 ? activeFeatures.join(', ') : 'none'}`);
+      console.log(`🎛️ Tenant ${tenantId} device ${deviceId} active features: ${activeFeatures.length > 0 ? activeFeatures.join(', ') : 'none'}`);
     }
-    
-    // Broadcast status change
-    broadcast({
+
+    // Broadcast status change to tenant clients only
+    broadcastToTenant(tenantId, {
       type: 'device_status_update',
       deviceId,
       device: device,
+      tenantId: tenantId,
       timestamp: new Date().toISOString(),
       source: 'status_calculation'
     });
   }
 }
 
-// FIXED: Start monitoring for a device
-function startDeviceStatusMonitoring(deviceId) {
+// FIXED: Start monitoring for a device with tenant context
+function startDeviceStatusMonitoring(tenantId, deviceId) {
+  // Get or create tenant status check intervals map
+  if (!tenantStatusCheckIntervals.has(tenantId)) {
+    tenantStatusCheckIntervals.set(tenantId, new Map());
+  }
+  const statusCheckIntervals = tenantStatusCheckIntervals.get(tenantId);
+
   // Clear existing interval if any
   if (statusCheckIntervals.has(deviceId)) {
     clearInterval(statusCheckIntervals.get(deviceId));
   }
-  
+
   // Start new monitoring interval
   const intervalId = setInterval(() => {
-    updateDeviceStatus(deviceId);
+    updateDeviceStatus(tenantId, deviceId);
   }, STATUS_CHECK_INTERVAL);
-  
+
   statusCheckIntervals.set(deviceId, intervalId);
-  console.log(`🔍 Started status monitoring for device: ${deviceId}`);
+  console.log(`🔍 Started status monitoring for tenant ${tenantId} device: ${deviceId}`);
 }
 
-// FIXED: Stop monitoring for a device
-function stopDeviceStatusMonitoring(deviceId) {
-  if (statusCheckIntervals.has(deviceId)) {
+// FIXED: Stop monitoring for a device with tenant context
+function stopDeviceStatusMonitoring(tenantId, deviceId) {
+  const statusCheckIntervals = tenantStatusCheckIntervals.get(tenantId);
+  if (statusCheckIntervals && statusCheckIntervals.has(deviceId)) {
     clearInterval(statusCheckIntervals.get(deviceId));
     statusCheckIntervals.delete(deviceId);
-    console.log(`🛑 Stopped monitoring for device: ${deviceId}`);
+    console.log(`🛑 Stopped monitoring for tenant ${tenantId} device: ${deviceId}`);
   }
 }
 
-// FIXED: Record device activity based on MQTT topic type
-function recordDeviceActivity(deviceId, topicType, data = null) {
+// FIXED: Record device activity with tenant context
+function recordDeviceActivity(tenantId, deviceId, topicType, data = null) {
   const now = Date.now();
-  
-  console.log(`📡 Recording activity for ${deviceId}: ${topicType} at ${new Date(now).toLocaleTimeString()}`);
-  
+
+  // Get or create tenant-specific activity maps
+  if (!tenantDeviceLastConnection.has(tenantId)) {
+    tenantDeviceLastConnection.set(tenantId, new Map());
+  }
+  if (!tenantDeviceLastRelayStatus.has(tenantId)) {
+    tenantDeviceLastRelayStatus.set(tenantId, new Map());
+  }
+  if (!tenantDeviceLastAck.has(tenantId)) {
+    tenantDeviceLastAck.set(tenantId, new Map());
+  }
+  if (!tenantDeviceConnectedToAWS.has(tenantId)) {
+    tenantDeviceConnectedToAWS.set(tenantId, new Map());
+  }
+
+  const deviceLastConnection = tenantDeviceLastConnection.get(tenantId);
+  const deviceLastRelayStatus = tenantDeviceLastRelayStatus.get(tenantId);
+  const deviceLastAck = tenantDeviceLastAck.get(tenantId);
+  const deviceConnectedToAWS = tenantDeviceConnectedToAWS.get(tenantId);
+
+  console.log(`📡 Recording activity for tenant ${tenantId} device ${deviceId}: ${topicType} at ${new Date(now).toLocaleTimeString()}`);
+
   switch (topicType) {
     case 'connection':
       deviceLastConnection.set(deviceId, now);
       if (data && data.status === 'connected') {
         deviceConnectedToAWS.set(deviceId, true);
-        console.log(`🔗 Device ${deviceId} sent connection status: CONNECTED`);
+        console.log(`🔗 Tenant ${tenantId} device ${deviceId} sent connection status: CONNECTED`);
       } else {
         deviceConnectedToAWS.set(deviceId, false);
-        console.log(`🔌 Device ${deviceId} sent connection status: DISCONNECTED`);
+        console.log(`🔌 Tenant ${tenantId} device ${deviceId} sent connection status: DISCONNECTED`);
       }
       break;
-      
+
     case 'relay_status':
       deviceLastRelayStatus.set(deviceId, now);
-      console.log(`📊 Device ${deviceId} sent relay status update`);
+      console.log(`📊 Tenant ${tenantId} device ${deviceId} sent relay status update`);
       break;
-      
+
     case 'relay_ack':
       deviceLastAck.set(deviceId, now);
-      console.log(`✅ Device ${deviceId} sent relay acknowledgment (actual hardware status)`);
+      console.log(`✅ Tenant ${tenantId} device ${deviceId} sent relay acknowledgment (actual hardware status)`);
       break;
-      
+
     case 'control':
-      console.log(`📤 Control command sent to ${deviceId}`);
+      console.log(`📤 Control command sent to tenant ${tenantId} device ${deviceId}`);
       break;
-      
+
     default:
-      console.log(`📡 General activity for ${deviceId}: ${topicType}`);
+      console.log(`📡 General activity for tenant ${tenantId} device ${deviceId}: ${topicType}`);
   }
-  
+
   // Immediately update status after any activity
-  updateDeviceStatus(deviceId);
+  updateDeviceStatus(tenantId, deviceId);
 }
 
-// FIXED: Enhanced broadcast function with proper message structure
-function broadcast(message) {
+// FIXED: Enhanced broadcast function with tenant filtering
+function broadcastToTenant(tenantId, message) {
   if (!message || !message.type) {
     console.warn('⚠️ Invalid broadcast message:', message);
     return;
   }
 
   message.timestamp = message.timestamp || new Date().toISOString();
+  message.tenantId = tenantId;
 
   const messageStr = JSON.stringify(message);
   let sentCount = 0;
 
+  const clients = getTenantClients(tenantId);
   clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
       try {
         client.send(messageStr);
         sentCount++;
       } catch (error) {
-        console.error('❌ Error broadcasting to client:', error);
+        console.error('❌ Error broadcasting to tenant client:', error);
         clients.delete(client);
       }
     } else {
@@ -1926,12 +355,50 @@ function broadcast(message) {
   });
 
   if (sentCount > 0) {
-    console.log(`📢 Broadcasted ${message.type} to ${sentCount} clients - Device: ${message.deviceId || 'N/A'}`);
+    console.log(`📢 Broadcasted ${message.type} to ${sentCount} clients in tenant ${tenantId} - Device: ${message.deviceId || 'N/A'}`);
   }
 }
 
-// FIXED: Proper relay-to-feature mapping with validation
-function mapRelayStatesToFeatures(device, relayStates) {
+// Broadcast to all tenants
+function broadcastToAll(message) {
+  if (!message || !message.type) {
+    console.warn('⚠️ Invalid broadcast message:', message);
+    return;
+  }
+
+  message.timestamp = message.timestamp || new Date().toISOString();
+  const messageStr = JSON.stringify(message);
+  let totalSentCount = 0;
+
+  tenantClients.forEach((clients, tenantId) => {
+    let tenantSentCount = 0;
+    clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(messageStr);
+          tenantSentCount++;
+          totalSentCount++;
+        } catch (error) {
+          console.error('❌ Error broadcasting to client:', error);
+          clients.delete(client);
+        }
+      } else {
+        clients.delete(client);
+      }
+    });
+
+    if (tenantSentCount > 0) {
+      console.log(`📢 Broadcasted ${message.type} to ${tenantSentCount} clients in tenant ${tenantId}`);
+    }
+  });
+
+  if (totalSentCount > 0) {
+    console.log(`📢 Total broadcast: ${message.type} to ${totalSentCount} clients across all tenants`);
+  }
+}
+
+// FIXED: Proper relay-to-feature mapping with tenant context
+function mapRelayStatesToFeatures(tenantId, device, relayStates) {
   try {
     const relayConfig = device.relayConfig || {
       relay1: 'siren',
@@ -1959,35 +426,34 @@ function mapRelayStatesToFeatures(device, relayStates) {
       features,
       relayStates,
       relayConfig,
+      tenantId,
       lastSeen: new Date().toLocaleTimeString(),
       lastUpdateTime: new Date().toISOString()
     };
   } catch (error) {
-    console.error('❌ Error mapping relay states:', error);
+    console.error('❌ Error mapping relay states for tenant:', tenantId, error);
     return device;
   }
 }
 
-// FIXED: Enhanced device status processing with proper activity tracking
-// FIXED: Enhanced device status processing with immediate status recalculation
-// FIXED: Reduce broadcasting to prevent dashboard refreshing
-// MINIMAL CHANGE: Also replace this function in your backend (paste-2.txt)
-function processDeviceStatusUpdate(thingName, data, source = 'unknown') {
+// FIXED: Enhanced device status processing with tenant context
+function processDeviceStatusUpdate(tenantId, thingName, data, source = 'unknown') {
   try {
-    if (!awsThings.has(thingName)) {
+    const tenantDevices = getTenantDevices(tenantId);
+    if (!tenantDevices.has(thingName)) {
       return;
     }
 
-    const device = awsThings.get(thingName);
+    const device = tenantDevices.get(thingName);
     const previousStatus = device.status;
 
     // Record activity
     if (source === 'connection') {
-      recordDeviceActivity(thingName, 'connection', data);
+      recordDeviceActivity(tenantId, thingName, 'connection', data);
     } else if (source === 'relay_ack') {
-      recordDeviceActivity(thingName, 'relay_ack', data);
+      recordDeviceActivity(tenantId, thingName, 'relay_ack', data);
     } else if (source === 'relay_status') {
-      recordDeviceActivity(thingName, 'relay_status', data);
+      recordDeviceActivity(tenantId, thingName, 'relay_status', data);
     }
 
     let updatedDevice = { ...device };
@@ -2000,18 +466,20 @@ function processDeviceStatusUpdate(thingName, data, source = 'unknown') {
         relay3: Boolean(data.relay3),
         relay4: Boolean(data.relay4)
       };
-      updatedDevice = mapRelayStatesToFeatures(device, newRelayStates);
+      updatedDevice = mapRelayStatesToFeatures(tenantId, device, newRelayStates);
     }
 
     updatedDevice.lastSeen = new Date().toLocaleTimeString();
     updatedDevice.lastUpdateTime = new Date().toISOString();
-    
-    // FIXED: Always use calculateDeviceStatus instead of setting 'active'
-    updatedDevice.status = calculateDeviceStatus(thingName);
+    updatedDevice.tenantId = tenantId;
+
+    // FIXED: Always use calculateDeviceStatus
+    updatedDevice.status = calculateDeviceStatus(tenantId, thingName);
 
     // Store updated device
-    awsThings.set(thingName, updatedDevice);
-    deviceStatus.set(thingName, updatedDevice);
+    tenantDevices.set(thingName, updatedDevice);
+    const tenantDeviceStatusMap = getTenantDeviceStatus(tenantId);
+    tenantDeviceStatusMap.set(thingName, updatedDevice);
 
     // FIXED: Only broadcast on important changes to prevent refreshing
     const shouldBroadcast = (
@@ -2021,27 +489,65 @@ function processDeviceStatusUpdate(thingName, data, source = 'unknown') {
     );
 
     if (shouldBroadcast) {
-      console.log(`📢 Broadcasting important change for ${thingName}: ${previousStatus} → ${updatedDevice.status}`);
-      broadcast({
+      console.log(`📢 Broadcasting important change for tenant ${tenantId} device ${thingName}: ${previousStatus} → ${updatedDevice.status}`);
+      broadcastToTenant(tenantId, {
         type: 'device_status_update',
         deviceId: thingName,
         device: updatedDevice,
+        tenantId: tenantId,
         timestamp: new Date().toISOString(),
         source: source
       });
     } else {
-      console.log(`🔄 Skipping broadcast for ${thingName} - routine update`);
+      console.log(`🔄 Skipping broadcast for tenant ${tenantId} device ${thingName} - routine update`);
     }
 
   } catch (error) {
-    console.error('❌ Error processing device status update:', error);
+    console.error('❌ Error processing device status update for tenant:', tenantId, error);
   }
 }
 
-// FIXED: Proper MQTT initialization with comprehensive subscriptions for your topics
+// Store device in DynamoDB with tenant context
+async function storeDeviceInDynamoDB(tenantId, device) {
+  try {
+    await dynamoDb.put({
+      TableName: TABLES.TENANT_DEVICES,
+      Item: {
+        tenantId,
+        deviceId: device.id,
+        ...device,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+    }).promise();
+    console.log(`✅ Stored device in DynamoDB for tenant ${tenantId}:`, device.id);
+  } catch (error) {
+    console.error('❌ Failed to store device in DynamoDB:', error);
+  }
+}
+
+// Load devices from DynamoDB for tenant
+async function loadDevicesFromDynamoDB(tenantId) {
+  try {
+    const result = await dynamoDb.query({
+      TableName: TABLES.TENANT_DEVICES,
+      KeyConditionExpression: 'tenantId = :tenantId',
+      ExpressionAttributeValues: {
+        ':tenantId': tenantId
+      }
+    }).promise();
+
+    return result.Items || [];
+  } catch (error) {
+    console.error('❌ Failed to load devices from DynamoDB for tenant:', tenantId, error);
+    return [];
+  }
+}
+
+// FIXED: MQTT initialization with tenant support
 function initializeMQTT() {
   try {
-    console.log('🔌 Initializing MQTT connection...');
+    console.log('🔌 Initializing MQTT connection with multi-tenant support...');
 
     // Load certificates from files
     const privateKeyPath = process.env.AWS_IOT_PRIVATE_KEY_PATH || './certs/pri.pem.key';
@@ -2057,13 +563,13 @@ function initializeMQTT() {
       console.log('✅ Loaded MQTT certificates from files');
     } catch (fileError) {
       console.log('📄 Certificate files not found, trying environment variables...');
-      
+
       // Fallback to environment variables
-      privateKey = process.env.AWS_IOT_PRIVATE_KEY ? 
+      privateKey = process.env.AWS_IOT_PRIVATE_KEY ?
         process.env.AWS_IOT_PRIVATE_KEY.replace(/\\n/g, '\n') : null;
-      certificate = process.env.AWS_IOT_CERTIFICATE ? 
+      certificate = process.env.AWS_IOT_CERTIFICATE ?
         process.env.AWS_IOT_CERTIFICATE.replace(/\\n/g, '\n') : null;
-      caCertificate = process.env.AWS_IOT_CA_CERTIFICATE ? 
+      caCertificate = process.env.AWS_IOT_CA_CERTIFICATE ?
         process.env.AWS_IOT_CA_CERTIFICATE.replace(/\\n/g, '\n') : null;
 
       if (!privateKey || !certificate || !caCertificate) {
@@ -2087,10 +593,10 @@ function initializeMQTT() {
     });
 
     mqttClient.on('connect', () => {
-      console.log('✅ MQTT connected - Real-time updates active');
+      console.log('✅ MQTT connected - Real-time multi-tenant updates active');
       mqttConnectionStatus = 'connected';
 
-      // FIXED: Subscribe to your specific topic patterns
+      // FIXED: Subscribe to topic patterns for all tenants
       const topicPatterns = [
         '+/connection',        // Device connection status
         '+/relay/status',      // Device relay status (every 10 seconds)
@@ -2109,13 +615,13 @@ function initializeMQTT() {
         });
       });
 
-      // Subscribe to existing devices
-      subscribeToAllDevices();
+      // Subscribe to existing devices for all tenants
+      subscribeToAllDevicesAllTenants();
 
-      broadcastConnectionStatus();
+      broadcastConnectionStatusToAll();
     });
 
-    // FIXED: Enhanced MQTT message handling for your specific topics
+    // FIXED: Enhanced MQTT message handling with tenant context
     mqttClient.on('message', (topic, message) => {
       try {
         const data = JSON.parse(message.toString());
@@ -2125,36 +631,46 @@ function initializeMQTT() {
 
         if (topicParts.length >= 2) {
           const deviceId = topicParts[0];
-          const messageType = topicParts[topicParts.length - 1]; // Last part of topic
+          const messageType = topicParts[topicParts.length - 1];
 
-          // Handle different message types based on your requirements
+          // Find which tenant this device belongs to
+          let deviceTenantId = null;
+          for (const [tenantId, devices] of tenantAwsThings.entries()) {
+            if (devices.has(deviceId)) {
+              deviceTenantId = tenantId;
+              break;
+            }
+          }
+
+          if (!deviceTenantId) {
+            console.log(`⚠️ Device ${deviceId} not found in any tenant, ignoring message`);
+            return;
+          }
+
+          // Handle different message types with tenant context
           switch (messageType) {
             case 'connection':
-              // Handle device connection status: zonex_3/connection
-              console.log(`🔗 Connection status from ${deviceId}:`, data);
-              processDeviceStatusUpdate(deviceId, data, 'connection');
+              console.log(`🔗 Connection status from tenant ${deviceTenantId} device ${deviceId}:`, data);
+              processDeviceStatusUpdate(deviceTenantId, deviceId, data, 'connection');
               break;
 
             case 'status':
-              // Handle relay status updates: zonex_3/relay/status (every 10 seconds)
-              console.log(`📊 Relay status from ${deviceId}:`, data);
-              processDeviceStatusUpdate(deviceId, data, 'relay_status');
+              console.log(`📊 Relay status from tenant ${deviceTenantId} device ${deviceId}:`, data);
+              processDeviceStatusUpdate(deviceTenantId, deviceId, data, 'relay_status');
               break;
 
             case 'ack':
-              // Handle relay acknowledgment: zonex_3/relay/ack (actual hardware status)
-              console.log(`✅ Relay acknowledgment from ${deviceId}:`, data);
-              processDeviceStatusUpdate(deviceId, data, 'relay_ack');
+              console.log(`✅ Relay acknowledgment from tenant ${deviceTenantId} device ${deviceId}:`, data);
+              processDeviceStatusUpdate(deviceTenantId, deviceId, data, 'relay_ack');
               break;
 
             case 'control':
-              // Handle control commands: zonex_3/relay/control
-              console.log(`📤 Control command acknowledgment from ${deviceId}:`, data);
-              recordDeviceActivity(deviceId, 'control', data);
+              console.log(`📤 Control command acknowledgment from tenant ${deviceTenantId} device ${deviceId}:`, data);
+              recordDeviceActivity(deviceTenantId, deviceId, 'control', data);
               break;
 
             default:
-              console.log(`❓ Unknown message type: ${messageType} from ${deviceId}`);
+              console.log(`❓ Unknown message type: ${messageType} from tenant ${deviceTenantId} device ${deviceId}`);
           }
         }
       } catch (error) {
@@ -2165,39 +681,49 @@ function initializeMQTT() {
     mqttClient.on('error', (error) => {
       console.error('❌ MQTT connection error:', error);
       mqttConnectionStatus = 'error';
-      broadcastConnectionStatus();
+      broadcastConnectionStatusToAll();
     });
 
     mqttClient.on('close', () => {
       console.log('🔌 MQTT connection closed');
       mqttConnectionStatus = 'disconnected';
-      broadcastConnectionStatus();
+      broadcastConnectionStatusToAll();
     });
 
     mqttClient.on('reconnect', () => {
       console.log('🔄 MQTT reconnecting...');
       mqttConnectionStatus = 'connecting';
-      broadcastConnectionStatus();
+      broadcastConnectionStatusToAll();
     });
 
   } catch (error) {
     console.error('❌ Failed to initialize MQTT:', error);
     mqttConnectionStatus = 'error';
-    
+
     // Continue without MQTT but use shadow polling
-    console.log('🔄 Continuing with shadow polling instead of MQTT...');
-    startShadowPollingForAllDevices();
+    console.log('🔄 Continuing with shadow polling for all tenants...');
+    startShadowPollingForAllTenants();
   }
 }
 
-// FIXED: Subscribe to all device topics for your specific patterns
+// Subscribe to all device topics for all tenants
+function subscribeToAllDevicesAllTenants() {
+  console.log('📡 Subscribing to all registered device topics for all tenants...');
+
+  tenantAwsThings.forEach((devices, tenantId) => {
+    devices.forEach((device, deviceId) => {
+      subscribeToDeviceTopics(deviceId);
+    });
+  });
+}
+
+// FIXED: Subscribe to device topics
 function subscribeToDeviceTopics(deviceId) {
   if (!mqttClient || !mqttClient.connected) {
     console.log(`⚠️ MQTT not connected, cannot subscribe to ${deviceId} topics`);
     return;
   }
 
-  // Subscribe to your specific topic patterns for this device
   const topics = [
     `${deviceId}/connection`,
     `${deviceId}/relay/status`,
@@ -2219,31 +745,33 @@ function subscribeToDeviceTopics(deviceId) {
   });
 }
 
-// Subscribe to all registered devices
-function subscribeToAllDevices() {
-  console.log('📡 Subscribing to all registered device topics...');
-  
-  awsThings.forEach((device, deviceId) => {
-    subscribeToDeviceTopics(deviceId);
+// Start shadow polling for all tenants
+function startShadowPollingForAllTenants() {
+  console.log('🔄 Starting shadow polling for all tenant devices (MQTT fallback)...');
+
+  tenantAwsThings.forEach((devices, tenantId) => {
+    devices.forEach((device, deviceId) => {
+      startShadowPolling(tenantId, deviceId);
+    });
   });
 }
 
-// Enhanced shadow loading with proper status tracking
-async function loadDeviceStatusFromShadow(deviceId) {
+// Enhanced shadow loading with tenant context
+async function loadDeviceStatusFromShadow(tenantId, deviceId) {
   try {
     if (!shadowClient) {
       console.warn('⚠️ Shadow client not initialized');
       return null;
     }
 
-    console.log(`📊 Fetching shadow for device: ${deviceId}`);
-    
+    console.log(`📊 Fetching shadow for tenant ${tenantId} device: ${deviceId}`);
+
     const shadowData = await shadowClient.getThingShadow({
       thingName: deviceId
     }).promise();
 
     const shadowPayload = JSON.parse(shadowData.payload);
-    console.log(`📋 Shadow data for ${deviceId}:`, shadowPayload);
+    console.log(`📋 Shadow data for tenant ${tenantId} device ${deviceId}:`, shadowPayload);
 
     let relayStates = null;
 
@@ -2256,10 +784,10 @@ async function loadDeviceStatusFromShadow(deviceId) {
         relay3: Boolean(reported.relay3),
         relay4: Boolean(reported.relay4)
       };
-      console.log(`🔴 Using REPORTED shadow state for ${deviceId} (from device):`, relayStates);
-      
+      console.log(`🔴 Using REPORTED shadow state for tenant ${tenantId} device ${deviceId} (from device):`, relayStates);
+
       // Process as relay_ack since it's from the device
-      processDeviceStatusUpdate(deviceId, {
+      processDeviceStatusUpdate(tenantId, deviceId, {
         ...relayStates,
         signal_strength: 85,
         battery_level: 100,
@@ -2274,31 +802,33 @@ async function loadDeviceStatusFromShadow(deviceId) {
         relay3: Boolean(desired.relay3),
         relay4: Boolean(desired.relay4)
       };
-      console.log(`🔵 Using DESIRED shadow state for ${deviceId} (command state):`, relayStates);
-      
+      console.log(`🔵 Using DESIRED shadow state for tenant ${tenantId} device ${deviceId} (command state):`, relayStates);
+
       // Don't update relay states from desired state, just note the device exists
-      recordDeviceActivity(deviceId, 'shadow_fetch');
+      recordDeviceActivity(tenantId, deviceId, 'shadow_fetch');
     }
 
     return relayStates;
   } catch (error) {
-    console.warn(`⚠️ Failed to load shadow for ${deviceId}:`, error.message);
-    
+    console.warn(`⚠️ Failed to load shadow for tenant ${tenantId} device ${deviceId}:`, error.message);
+
     // If shadow doesn't exist, create initial state
     if (error.code === 'ResourceNotFoundException') {
-      await createInitialShadow(deviceId);
+      await createInitialShadow(tenantId, deviceId);
     } else {
       // Mark device as not connected to AWS due to error
+      const deviceConnectedToAWS = tenantDeviceConnectedToAWS.get(tenantId) || new Map();
       deviceConnectedToAWS.set(deviceId, false);
-      updateDeviceStatus(deviceId);
+      tenantDeviceConnectedToAWS.set(tenantId, deviceConnectedToAWS);
+      updateDeviceStatus(tenantId, deviceId);
     }
-    
+
     return null;
   }
 }
 
 // Create initial shadow for new devices
-async function createInitialShadow(deviceId) {
+async function createInitialShadow(tenantId, deviceId) {
   try {
     const initialState = {
       state: {
@@ -2316,44 +846,40 @@ async function createInitialShadow(deviceId) {
       payload: JSON.stringify(initialState)
     }).promise();
 
-    console.log(`✅ Created initial shadow for ${deviceId}`);
-    recordDeviceActivity(deviceId, 'shadow_create');
+    console.log(`✅ Created initial shadow for tenant ${tenantId} device ${deviceId}`);
+    recordDeviceActivity(tenantId, deviceId, 'shadow_create');
   } catch (error) {
-    console.warn(`⚠️ Failed to create initial shadow for ${deviceId}:`, error.message);
+    console.warn(`⚠️ Failed to create initial shadow for tenant ${tenantId} device ${deviceId}:`, error.message);
+    const deviceConnectedToAWS = tenantDeviceConnectedToAWS.get(tenantId) || new Map();
     deviceConnectedToAWS.set(deviceId, false);
-    updateDeviceStatus(deviceId);
+    tenantDeviceConnectedToAWS.set(tenantId, deviceConnectedToAWS);
+    updateDeviceStatus(tenantId, deviceId);
   }
 }
 
-// Start shadow polling as fallback
-function startShadowPollingForAllDevices() {
-  console.log('🔄 Starting shadow polling for all devices (MQTT fallback)...');
-  
-  awsThings.forEach((device, deviceId) => {
-    startShadowPolling(deviceId);
-  });
-}
-
-function startShadowPolling(deviceId) {
+function startShadowPolling(tenantId, deviceId) {
   // Initial fetch
   setTimeout(() => {
-    loadDeviceStatusFromShadow(deviceId);
+    loadDeviceStatusFromShadow(tenantId, deviceId);
   }, 1000);
 
   // Polling interval (only if MQTT is not working)
   if (mqttConnectionStatus !== 'connected') {
     const interval = setInterval(async () => {
-      if (!awsThings.has(deviceId)) {
+      const tenantDevices = getTenantDevices(tenantId);
+      if (!tenantDevices.has(deviceId)) {
         clearInterval(interval);
         return;
       }
 
       try {
-        await loadDeviceStatusFromShadow(deviceId);
+        await loadDeviceStatusFromShadow(tenantId, deviceId);
       } catch (error) {
-        console.warn(`⚠️ Shadow polling failed for ${deviceId}:`, error.message);
+        console.warn(`⚠️ Shadow polling failed for tenant ${tenantId} device ${deviceId}:`, error.message);
+        const deviceConnectedToAWS = tenantDeviceConnectedToAWS.get(tenantId) || new Map();
         deviceConnectedToAWS.set(deviceId, false);
-        updateDeviceStatus(deviceId);
+        tenantDeviceConnectedToAWS.set(tenantId, deviceConnectedToAWS);
+        updateDeviceStatus(tenantId, deviceId);
       }
     }, 30000); // Poll every 30 seconds as fallback
   }
@@ -2362,7 +888,7 @@ function startShadowPolling(deviceId) {
 // Enhanced startup process
 async function initializeAWSConnection() {
   try {
-    console.log('🔍 Initializing AWS IoT connection...');
+    console.log('🔍 Initializing AWS IoT connection with multi-tenant support...');
 
     // Get IoT endpoint
     if (process.env.AWS_IOT_ENDPOINT) {
@@ -2382,19 +908,19 @@ async function initializeAWSConnection() {
     awsConnectionStatus = 'connected';
     console.log('✅ AWS IoT connection established');
 
-    // Load existing registered things from AWS
-    await loadExistingThings();
+    // Load existing registered things for all tenants from DynamoDB
+    await loadExistingThingsAllTenants();
 
     // Initialize MQTT for real-time updates
     initializeMQTT();
 
     // Broadcast connection status
-    broadcastConnectionStatus();
+    broadcastConnectionStatusToAll();
 
   } catch (error) {
     console.error('❌ Failed to initialize AWS IoT:', error.message);
     awsConnectionStatus = 'error';
-    broadcastConnectionStatus();
+    broadcastConnectionStatusToAll();
 
     // Even if AWS fails, start the server for local testing
     console.log('🚀 Starting server in local mode...');
@@ -2406,68 +932,102 @@ async function testAWSConnection() {
   console.log('✅ AWS IoT connection test successful');
 }
 
-// Load existing things with immediate status fetching and monitoring
-async function loadExistingThings() {
+// Load existing things for all tenants from DynamoDB
+async function loadExistingThingsAllTenants() {
   try {
-    console.log('📋 Loading existing AWS IoT Things...');
-    const result = await iot.listThings().promise();
+    console.log('📋 Loading existing devices for all tenants from DynamoDB...');
 
-    let registeredCount = 0;
-    for (const thing of result.things) {
-      const isRegistered = thing.attributes?.registered === 'true';
+    // Scan all tenant devices
+    const result = await dynamoDb.scan({
+      TableName: TABLES.TENANT_DEVICES
+    }).promise();
 
-      if (isRegistered) {
-        const deviceData = createDeviceFromThing(thing);
+    const devicesByTenant = new Map();
+
+    // Group devices by tenant
+    result.Items.forEach(deviceRecord => {
+      const tenantId = deviceRecord.tenantId;
+      if (!devicesByTenant.has(tenantId)) {
+        devicesByTenant.set(tenantId, []);
+      }
+      devicesByTenant.get(tenantId).push(deviceRecord);
+    });
+
+    // Process each tenant's devices
+    for (const [tenantId, tenantDevices] of devicesByTenant.entries()) {
+      console.log(`📋 Loading ${tenantDevices.length} devices for tenant: ${tenantId}`);
+
+      const tenantDeviceMap = getTenantDevices(tenantId);
+      const tenantDeviceStatusMap = getTenantDeviceStatus(tenantId);
+
+      for (const deviceRecord of tenantDevices) {
+        const deviceData = createDeviceFromRecord(deviceRecord);
 
         // Store device data
-        awsThings.set(thing.thingName, deviceData);
-        deviceStatus.set(thing.thingName, {
+        tenantDeviceMap.set(deviceData.id, deviceData);
+        tenantDeviceStatusMap.set(deviceData.id, {
           ...deviceData,
           lastUpdateTime: new Date().toISOString()
         });
 
         // Initialize tracking for this device
-        deviceLastConnection.set(thing.thingName, 0);
-        deviceLastRelayStatus.set(thing.thingName, 0);
-        deviceLastAck.set(thing.thingName, 0);
-        deviceConnectedToAWS.set(thing.thingName, false);
+        initializeTenantDeviceTracking(tenantId, deviceData.id);
 
         // Start status monitoring
-        startDeviceStatusMonitoring(thing.thingName);
+        startDeviceStatusMonitoring(tenantId, deviceData.id);
 
-        registeredCount++;
-
-        // Load initial status from shadow immediately
+        // Load initial status from shadow
         setTimeout(async () => {
-          await loadDeviceStatusFromShadow(thing.thingName);
-          
+          await loadDeviceStatusFromShadow(tenantId, deviceData.id);
+
           // Subscribe to MQTT topics if connected
           if (mqttClient && mqttClient.connected) {
-            subscribeToDeviceTopics(thing.thingName);
+            subscribeToDeviceTopics(deviceData.id);
           }
-        }, registeredCount * 500); // Stagger the fetches
+        }, tenantDevices.indexOf(deviceRecord) * 500); // Stagger the fetches
       }
+
+      console.log(`✅ Loaded ${tenantDevices.length} devices for tenant: ${tenantId}`);
     }
 
-    console.log(`✅ Loaded ${registeredCount} registered devices from AWS`);
-
   } catch (error) {
-    console.error('❌ Error loading existing things:', error);
+    console.error('❌ Error loading existing things for all tenants:', error);
   }
 }
 
-// Create device from thing with proper defaults
-// Create device from thing with proper defaults (continued)
-function createDeviceFromThing(thing) {
+// Initialize device tracking for tenant
+function initializeTenantDeviceTracking(tenantId, deviceId) {
+  // Initialize tenant-specific maps if they don't exist
+  if (!tenantDeviceLastConnection.has(tenantId)) {
+    tenantDeviceLastConnection.set(tenantId, new Map());
+  }
+  if (!tenantDeviceLastRelayStatus.has(tenantId)) {
+    tenantDeviceLastRelayStatus.set(tenantId, new Map());
+  }
+  if (!tenantDeviceLastAck.has(tenantId)) {
+    tenantDeviceLastAck.set(tenantId, new Map());
+  }
+  if (!tenantDeviceConnectedToAWS.has(tenantId)) {
+    tenantDeviceConnectedToAWS.set(tenantId, new Map());
+  }
+
+  // Initialize device tracking
+  tenantDeviceLastConnection.get(tenantId).set(deviceId, 0);
+  tenantDeviceLastRelayStatus.get(tenantId).set(deviceId, 0);
+  tenantDeviceLastAck.get(tenantId).set(deviceId, 0);
+  tenantDeviceConnectedToAWS.get(tenantId).set(deviceId, false);
+}
+
+// Create device from DynamoDB record
+function createDeviceFromRecord(deviceRecord) {
   let relayConfig;
   try {
-    relayConfig = thing.attributes?.relayConfig ?
-      JSON.parse(thing.attributes.relayConfig) : {
-        relay1: 'siren',
-        relay2: 'beacon',
-        relay3: 'announcement',
-        relay4: 'dispenser'
-      };
+    relayConfig = deviceRecord.relayConfig || {
+      relay1: 'siren',
+      relay2: 'beacon',
+      relay3: 'announcement',
+      relay4: 'dispenser'
+    };
   } catch (error) {
     relayConfig = {
       relay1: 'siren',
@@ -2478,40 +1038,41 @@ function createDeviceFromThing(thing) {
   }
 
   return {
-    id: thing.thingName,
-    name: thing.attributes?.displayName || thing.thingName,
-    location: thing.attributes?.location || '',
-    lat: parseFloat(thing.attributes?.latitude || '12.9716'),
-    lng: parseFloat(thing.attributes?.longitude || '77.5946'),
-    group: thing.attributes?.group || null,
+    id: deviceRecord.deviceId,
+    name: deviceRecord.name || deviceRecord.deviceId,
+    location: deviceRecord.location || '',
+    lat: parseFloat(deviceRecord.lat || '12.9716'),
+    lng: parseFloat(deviceRecord.lng || '77.5946'),
+    group: deviceRecord.group || null,
     status: 'offline', // Start as offline until we get real status
-    features: {
+    features: deviceRecord.features || {
       siren: false,
       beacon: false,
       announcement: false,
       dispenser: false
     },
-    relayStates: {
+    relayStates: deviceRecord.relayStates || {
       relay1: false,
       relay2: false,
       relay3: false,
       relay4: false
     },
     relayConfig,
-    created: new Date().toISOString(),
+    tenantId: deviceRecord.tenantId,
+    created: deviceRecord.createdAt || new Date().toISOString(),
     lastSeen: 'Never',
     signalStrength: 0,
     batteryLevel: 100,
-    thingArn: thing.thingArn,
-    thingTypeName: thing.thingTypeName,
-    version: thing.version
+    thingArn: deviceRecord.thingArn,
+    thingTypeName: deviceRecord.thingTypeName,
+    version: deviceRecord.version
   };
 }
 
-// WebSocket client handling with enhanced connection status
+// WebSocket client handling with tenant context
 wss.on('connection', (ws) => {
   console.log('🔗 Client connected via WebSocket');
-  clients.add(ws);
+  let clientTenantId = null;
 
   // Send immediate connection status
   const connectionData = {
@@ -2528,36 +1089,49 @@ wss.on('connection', (ws) => {
     console.warn('Failed to send connection status to new client:', error);
   }
 
-  // Send current device states immediately
-  setTimeout(() => {
-    console.log(`📤 Sending ${awsThings.size} device states to new client`);
-    let sentCount = 0;
-
-    awsThings.forEach((device, deviceId) => {
-      try {
-        const deviceMessage = {
-          type: 'device_status_update',
-          deviceId,
-          device,
-          timestamp: new Date().toISOString(),
-          source: 'initial_sync'
-        };
-        ws.send(JSON.stringify(deviceMessage));
-        sentCount++;
-      } catch (error) {
-        console.warn(`Failed to send device ${deviceId} to client:`, error);
-      }
-    });
-
-    console.log(`✅ Sent ${sentCount} device states to new client`);
-  }, 500);
-
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
-      if (data.type === 'ping') {
+
+      if (data.type === 'set_tenant_context') {
+        // Client is setting their tenant context
+        clientTenantId = data.tenantId;
+        console.log(`🏢 Client set tenant context: ${clientTenantId}`);
+
+        // Add client to tenant-specific client set
+        const tenantClientSet = getTenantClients(clientTenantId);
+        tenantClientSet.add(ws);
+
+        // Send current device states for this tenant immediately
+        setTimeout(() => {
+          const tenantDevices = getTenantDevices(clientTenantId);
+          console.log(`📤 Sending ${tenantDevices.size} device states to tenant ${clientTenantId} client`);
+          let sentCount = 0;
+
+          tenantDevices.forEach((device, deviceId) => {
+            try {
+              const deviceMessage = {
+                type: 'device_status_update',
+                deviceId,
+                device,
+                tenantId: clientTenantId,
+                timestamp: new Date().toISOString(),
+                source: 'initial_sync'
+              };
+              ws.send(JSON.stringify(deviceMessage));
+              sentCount++;
+            } catch (error) {
+              console.warn(`Failed to send tenant ${clientTenantId} device ${deviceId} to client:`, error);
+            }
+          });
+
+          console.log(`✅ Sent ${sentCount} device states to tenant ${clientTenantId} client`);
+        }, 500);
+
+      } else if (data.type === 'ping') {
         ws.send(JSON.stringify({
           type: 'pong',
+          tenantId: clientTenantId,
           timestamp: new Date().toISOString()
         }));
       }
@@ -2568,17 +1142,27 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     console.log('🔌 WebSocket client disconnected');
-    clients.delete(ws);
+
+    // Remove from tenant client set
+    if (clientTenantId) {
+      const tenantClientSet = getTenantClients(clientTenantId);
+      tenantClientSet.delete(ws);
+    }
   });
 
   ws.on('error', (error) => {
     console.error('❌ WebSocket error:', error);
-    clients.delete(ws);
+
+    // Remove from tenant client set
+    if (clientTenantId) {
+      const tenantClientSet = getTenantClients(clientTenantId);
+      tenantClientSet.delete(ws);
+    }
   });
 });
 
-function broadcastConnectionStatus() {
-  broadcast({
+function broadcastConnectionStatusToAll() {
+  broadcastToAll({
     type: 'connection_status',
     status: awsConnectionStatus,
     mqttConnected: mqttClient?.connected || false,
@@ -2586,22 +1170,29 @@ function broadcastConnectionStatus() {
   });
 }
 
-function initializeDeviceTracking() {
-  // Clear existing tracking
-  deviceLastConnection.clear();
-  deviceLastRelayStatus.clear();
-  deviceLastAck.clear();
-  deviceConnectedToAWS.clear();
-  
-  console.log('🔄 Initialized device tracking with enhanced status logic for your MQTT topics');
-}
-
-// API Routes
+// API Routes with tenant context
 
 app.get('/api/health', (req, res) => {
-  const onlineDevices = Array.from(awsThings.values()).filter(d => d.status === 'online').length;
-  const activeDevices = Array.from(awsThings.values()).filter(d => d.status === 'active').length;
-  const offlineDevices = Array.from(awsThings.values()).filter(d => d.status === 'offline').length;
+  let totalDevices = 0;
+  let totalOnlineDevices = 0;
+  let totalActiveDevices = 0;
+  let totalOfflineDevices = 0;
+
+  // Aggregate stats across all tenants
+  tenantAwsThings.forEach((devices, tenantId) => {
+    const tenantDevicesArray = Array.from(devices.values());
+    totalDevices += tenantDevicesArray.length;
+    totalOnlineDevices += tenantDevicesArray.filter(d => d.status === 'online').length;
+    totalActiveDevices += tenantDevicesArray.filter(d => d.status === 'active').length;
+    totalOfflineDevices += tenantDevicesArray.filter(d => d.status === 'offline').length;
+  });
+
+  // Get tenant-specific stats if tenant ID provided
+  const tenantStats = req.tenantId ? {
+    tenantId: req.tenantId,
+    devices: tenantAwsThings.get(req.tenantId)?.size || 0,
+    clients: tenantClients.get(req.tenantId)?.size || 0
+  } : null;
 
   res.json({
     status: 'healthy',
@@ -2609,22 +1200,34 @@ app.get('/api/health', (req, res) => {
     aws: awsConnectionStatus,
     mqtt: mqttClient?.connected || false,
     endpoint: iotEndpoint || 'Not configured',
-    things: awsThings.size,
-    clients: clients.size,
+    totalTenants: tenantAwsThings.size,
+    totalThings: totalDevices,
+    totalClients: Array.from(tenantClients.values()).reduce((sum, clients) => sum + clients.size, 0),
     deviceStats: {
-      total: awsThings.size,
-      online: onlineDevices,
-      active: activeDevices,
-      offline: offlineDevices
+      total: totalDevices,
+      online: totalOnlineDevices,
+      active: totalActiveDevices,
+      offline: totalOfflineDevices
     },
-    lastActivity: statusHistory.length > 0 ? statusHistory[0].timestamp : null
+    tenantStats,
+    lastActivity: tenantStatusHistory.size > 0 ?
+      Array.from(tenantStatusHistory.values()).flat().sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0]?.timestamp :
+      null
   });
 });
 
-// Register thing with immediate status fetching and MQTT subscription
+// Register thing with tenant context and immediate status fetching
 app.post('/api/iot/register-thing', async (req, res) => {
   try {
-    const { thingName, name, location, lat, lng, group, relayConfig } = req.body;
+    const { thingName, name, location, lat, lng, group, relayConfig, tenantId } = req.body;
+    const contextTenantId = tenantId || req.tenantId;
+
+    if (!contextTenantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tenant context is required'
+      });
+    }
 
     if (!thingName) {
       return res.status(400).json({
@@ -2644,10 +1247,11 @@ app.post('/api/iot/register-thing', async (req, res) => {
       });
     }
 
-    if (awsThings.has(thingName)) {
+    const tenantDevices = getTenantDevices(contextTenantId);
+    if (tenantDevices.has(thingName)) {
       return res.status(409).json({
         success: false,
-        error: 'Thing already registered'
+        error: 'Thing already registered in this tenant'
       });
     }
 
@@ -2680,6 +1284,7 @@ app.post('/api/iot/register-thing', async (req, res) => {
         relay4: false
       },
       relayConfig: finalRelayConfig,
+      tenantId: contextTenantId,
       created: new Date().toISOString(),
       lastSeen: 'Never',
       signalStrength: 0,
@@ -2687,29 +1292,33 @@ app.post('/api/iot/register-thing', async (req, res) => {
       lastUpdateTime: new Date().toISOString()
     };
 
-    // Store in memory
-    awsThings.set(thingName, deviceData);
-    deviceStatus.set(thingName, {
+    // Store in memory for tenant
+    tenantDevices.set(thingName, deviceData);
+    const tenantDeviceStatusMap = getTenantDeviceStatus(contextTenantId);
+    tenantDeviceStatusMap.set(thingName, {
       ...deviceData,
       lastUpdateTime: new Date().toISOString()
     });
 
+    // ADD this line right after:
+    console.log(`✅ Device ${thingName} registered for tenant ${contextTenantId} - Total tenant devices: ${tenantDevices.size}`);
+
+    // Store in DynamoDB
+    await storeDeviceInDynamoDB(contextTenantId, deviceData);
+
     // Initialize proper tracking for this device
-    deviceLastConnection.set(thingName, 0);
-    deviceLastRelayStatus.set(thingName, 0);
-    deviceLastAck.set(thingName, 0);
-    deviceConnectedToAWS.set(thingName, false);
+    initializeTenantDeviceTracking(contextTenantId, thingName);
 
     // Start status monitoring
-    startDeviceStatusMonitoring(thingName);
+    startDeviceStatusMonitoring(contextTenantId, thingName);
 
     // Check for real device status and subscribe to MQTT topics
     setTimeout(async () => {
-      console.log(`🔄 Setting up monitoring for newly registered device: ${thingName}`);
-      
+      console.log(`🔄 Setting up monitoring for newly registered tenant ${contextTenantId} device: ${thingName}`);
+
       // Load initial status from shadow
-      await loadDeviceStatusFromShadow(thingName);
-      
+      await loadDeviceStatusFromShadow(contextTenantId, thingName);
+
       // Subscribe to MQTT topics for real device updates
       if (mqttClient && mqttClient.connected) {
         subscribeToDeviceTopics(thingName);
@@ -2725,27 +1334,30 @@ app.post('/api/iot/register-thing', async (req, res) => {
             ...awsThing.attributes,
             displayName: name || thingName,
             location: location || '',
+            tenantId: contextTenantId,
             registered: 'true',
             registeredAt: new Date().toISOString()
           }
         }
       }).promise();
-      console.log(`✅ Updated AWS thing attributes for ${thingName}`);
+      console.log(`✅ Updated AWS thing attributes for tenant ${contextTenantId} device ${thingName}`);
     } catch (updateError) {
       console.warn('⚠️ Failed to update thing attributes:', updateError.message);
     }
 
-    // Broadcast device registration
-    broadcast({
+    // Broadcast device registration to tenant clients only
+    broadcastToTenant(contextTenantId, {
       type: 'device_created',
       device: deviceData,
+      tenantId: contextTenantId,
       timestamp: new Date().toISOString()
     });
 
     res.status(201).json({
       success: true,
-      message: 'AWS IoT Thing registered successfully - Monitoring MQTT topics for real-time updates',
+      message: 'AWS IoT Thing registered successfully for tenant - Monitoring MQTT topics for real-time updates',
       device: deviceData,
+      tenantId: contextTenantId,
       topics: {
         connection: `${thingName}/connection`,
         status: `${thingName}/relay/status`,
@@ -2764,10 +1376,18 @@ app.post('/api/iot/register-thing', async (req, res) => {
   }
 });
 
-// Enhanced command sending with device status validation - ONLY ACTIVE DEVICES
+// Enhanced command sending with tenant context - ONLY ACTIVE DEVICES
 app.post('/api/iot/command', async (req, res) => {
   try {
-    const { deviceId, command, data } = req.body;
+    const { deviceId, command, data, tenantId } = req.body;
+    const contextTenantId = tenantId || req.tenantId;
+
+    if (!contextTenantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tenant context is required'
+      });
+    }
 
     if (!deviceId || !command) {
       return res.status(400).json({
@@ -2776,28 +1396,30 @@ app.post('/api/iot/command', async (req, res) => {
       });
     }
 
-    if (!awsThings.has(deviceId)) {
+    const tenantDevices = getTenantDevices(contextTenantId);
+    if (!tenantDevices.has(deviceId)) {
       return res.status(404).json({
         success: false,
-        error: 'Device not found'
+        error: 'Device not found in tenant'
       });
     }
 
-    const device = awsThings.get(deviceId);
-    
+    const device = tenantDevices.get(deviceId);
+
     // Allow commands if device is online or active (not offline)
     if (device.status === 'offline') {
       return res.status(400).json({
         success: false,
         error: `Cannot send command to offline device. Device status is '${device.status}'. Device must be 'online' or 'active' for control.`,
         deviceStatus: device.status,
+        tenantId: contextTenantId,
         message: 'Device is offline. Please wait for device to come online.',
         requirement: 'Device must be ONLINE or ACTIVE (connected to AWS) to accept commands'
       });
     }
 
-    console.log(`🎛️ Command approved for ${device.status.toUpperCase()} device ${deviceId}: ${command}`);
-    
+    console.log(`🎛️ Command approved for tenant ${contextTenantId} ${device.status.toUpperCase()} device ${deviceId}: ${command}`);
+
     const controlTopic = `${deviceId}/relay/control`;
 
     // FIXED: Start with current relay states (preserve existing state)
@@ -2834,7 +1456,7 @@ app.post('/api/iot/command', async (req, res) => {
         // ONLY update the specific relay for this feature
         payload[relayNum] = newState;
 
-        console.log(`🎛️ Feature ${feature} mapped to ${relayNum}: ${currentState} → ${newState} (Device is ${device.status.toUpperCase()})`);
+        console.log(`🎛️ Tenant ${contextTenantId} feature ${feature} mapped to ${relayNum}: ${currentState} → ${newState} (Device is ${device.status.toUpperCase()})`);
         console.log(`🎛️ Preserving other relay states:`, {
           relay1: relayNum !== 'relay1' ? payload.relay1 : 'UPDATED',
           relay2: relayNum !== 'relay2' ? payload.relay2 : 'UPDATED',
@@ -2843,7 +1465,7 @@ app.post('/api/iot/command', async (req, res) => {
         });
 
         // Record command activity
-        recordDeviceActivity(deviceId, 'control');
+        recordDeviceActivity(contextTenantId, deviceId, 'control');
       } else {
         console.warn(`⚠️ No relay mapping found for feature: ${feature}`);
       }
@@ -2855,7 +1477,7 @@ app.post('/api/iot/command', async (req, res) => {
     if (mqttClient && mqttClient.connected) {
       mqttClient.publish(controlTopic, JSON.stringify(payload), (err) => {
         if (!err) {
-          console.log(`📤 Partial command sent via MQTT to ${device.status.toUpperCase()} device ${controlTopic}:`, payload);
+          console.log(`📤 Partial command sent via MQTT to tenant ${contextTenantId} ${device.status.toUpperCase()} device ${controlTopic}:`, payload);
           commandSent = true;
         }
       });
@@ -2868,7 +1490,7 @@ app.post('/api/iot/command', async (req, res) => {
           topic: controlTopic,
           payload: JSON.stringify(payload)
         }).promise();
-        console.log(`📤 Partial command sent via IoT Data API to ${device.status.toUpperCase()} device ${controlTopic}:`, payload);
+        console.log(`📤 Partial command sent via IoT Data API to tenant ${contextTenantId} ${device.status.toUpperCase()} device ${controlTopic}:`, payload);
         commandSent = true;
       } catch (iotError) {
         console.error('❌ IoT Data publish failed:', iotError.message);
@@ -2884,29 +1506,31 @@ app.post('/api/iot/command', async (req, res) => {
             state: { desired: payload }
           })
         }).promise();
-        console.log(`📋 Device shadow updated for ${device.status.toUpperCase()} device ${deviceId}`);
+        console.log(`📋 Device shadow updated for tenant ${contextTenantId} ${device.status.toUpperCase()} device ${deviceId}`);
       } catch (shadowError) {
         console.warn('⚠️ Failed to update device shadow:', shadowError.message);
       }
     }
 
-    // Broadcast command sent
-    broadcast({
+    // Broadcast command sent to tenant clients only
+    broadcastToTenant(contextTenantId, {
       type: 'command_sent',
       deviceId,
       command,
       topic: controlTopic,
       payload,
+      tenantId: contextTenantId,
       timestamp: new Date().toISOString()
     });
 
     res.json({
       success: true,
-      message: `Partial command sent successfully to ${device.status.toUpperCase()} device. Waiting for relay acknowledgment on ${deviceId}/relay/ack`,
+      message: `Partial command sent successfully to tenant ${contextTenantId} ${device.status.toUpperCase()} device. Waiting for relay acknowledgment on ${deviceId}/relay/ack`,
       method: commandSent ? (mqttClient?.connected ? 'MQTT' : 'IoT Data') : 'Simulated',
       topic: controlTopic,
       payload,
       deviceStatus: device.status,
+      tenantId: contextTenantId,
       note: 'Device will send acknowledgment on relay/ack topic with actual hardware status'
     });
 
@@ -2920,11 +1544,18 @@ app.post('/api/iot/command', async (req, res) => {
   }
 });
 
-
-
+// Enhanced scenario execution with tenant context
 app.post('/api/iot/scenario', async (req, res) => {
   try {
-    const { deviceIds, scenario, features } = req.body;
+    const { deviceIds, scenario, features, tenantId } = req.body;
+    const contextTenantId = tenantId || req.tenantId;
+
+    if (!contextTenantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tenant context is required'
+      });
+    }
 
     if (!deviceIds || !Array.isArray(deviceIds) || deviceIds.length === 0) {
       return res.status(400).json({
@@ -2933,15 +1564,17 @@ app.post('/api/iot/scenario', async (req, res) => {
       });
     }
 
-    // Check if all devices are online or active (not offline)
+    const tenantDevices = getTenantDevices(contextTenantId);
+
+    // Check if all devices are online or active (not offline) and belong to tenant
     const offlineDevices = [];
     const onlineDevices = [];
 
     deviceIds.forEach(deviceId => {
-      if (!awsThings.has(deviceId)) {
-        offlineDevices.push({ deviceId, reason: 'not_found' });
+      if (!tenantDevices.has(deviceId)) {
+        offlineDevices.push({ deviceId, reason: 'not_found_in_tenant' });
       } else {
-        const device = awsThings.get(deviceId);
+        const device = tenantDevices.get(deviceId);
         if (device.status === 'offline') {
           offlineDevices.push({ deviceId, reason: device.status });
         } else {
@@ -2956,12 +1589,13 @@ app.post('/api/iot/scenario', async (req, res) => {
         error: 'Some devices are offline and cannot receive commands',
         offlineDevices: offlineDevices,
         onlineDevices: onlineDevices,
+        tenantId: contextTenantId,
         message: 'Only ONLINE or ACTIVE devices can receive scenario commands. Please wait for devices to come online.',
         requirement: 'All devices must be ONLINE or ACTIVE (connected to AWS) to execute scenarios'
       });
     }
 
-    console.log(`🎭 Scenario approved for ${onlineDevices.length} ONLINE/ACTIVE devices`);
+    console.log(`🎭 Scenario approved for tenant ${contextTenantId} ${onlineDevices.length} ONLINE/ACTIVE devices`);
 
     // Use features if provided, otherwise use scenario mapping
     let targetFeatures;
@@ -2990,10 +1624,10 @@ app.post('/api/iot/scenario', async (req, res) => {
 
     const results = [];
 
-    // Send commands to each ONLINE/ACTIVE device
+    // Send commands to each ONLINE/ACTIVE device in tenant
     for (const deviceId of onlineDevices) {
       try {
-        const device = awsThings.get(deviceId);
+        const device = tenantDevices.get(deviceId);
         const controlTopic = `${deviceId}/relay/control`;
 
         // Proper feature to relay mapping
@@ -3023,29 +1657,29 @@ app.post('/api/iot/scenario', async (req, res) => {
           const relayForFeature = featureToRelay[feature];
           if (relayForFeature) {
             payload[relayForFeature] = Boolean(shouldEnable);
-            console.log(`🎛️ Updating feature ${feature} -> ${relayForFeature}: ${shouldEnable}`);
+            console.log(`🎛️ Tenant ${contextTenantId} updating feature ${feature} -> ${relayForFeature}: ${shouldEnable}`);
           }
         });
 
-        console.log(`📋 ${device.status.toUpperCase()} Device ${deviceId} relay mapping:`, relayConfig);
-        console.log(`📋 ${device.status.toUpperCase()} Device ${deviceId} current state:`, device.relayStates);
-        console.log(`📋 ${device.status.toUpperCase()} Device ${deviceId} final payload (partial):`, payload);
+        console.log(`📋 Tenant ${contextTenantId} ${device.status.toUpperCase()} Device ${deviceId} relay mapping:`, relayConfig);
+        console.log(`📋 Tenant ${contextTenantId} ${device.status.toUpperCase()} Device ${deviceId} current state:`, device.relayStates);
+        console.log(`📋 Tenant ${contextTenantId} ${device.status.toUpperCase()} Device ${deviceId} final payload (partial):`, payload);
 
         // Record scenario activity
-        recordDeviceActivity(deviceId, 'control');
+        recordDeviceActivity(contextTenantId, deviceId, 'control');
 
         // Send command
         let sent = false;
         if (mqttClient && mqttClient.connected) {
           mqttClient.publish(controlTopic, JSON.stringify(payload));
-          console.log(`📤 MQTT partial command sent to ${device.status.toUpperCase()} device ${deviceId}:`, payload);
+          console.log(`📤 MQTT partial command sent to tenant ${contextTenantId} ${device.status.toUpperCase()} device ${deviceId}:`, payload);
           sent = true;
         } else if (iotData) {
           await iotData.publish({
             topic: controlTopic,
             payload: JSON.stringify(payload)
           }).promise();
-          console.log(`📤 IoT Data partial command sent to ${device.status.toUpperCase()} device ${deviceId}:`, payload);
+          console.log(`📤 IoT Data partial command sent to tenant ${contextTenantId} ${device.status.toUpperCase()} device ${deviceId}:`, payload);
           sent = true;
         }
 
@@ -3058,9 +1692,9 @@ app.post('/api/iot/scenario', async (req, res) => {
                 state: { desired: payload }
               })
             }).promise();
-            console.log(`📋 Shadow updated for ${device.status.toUpperCase()} device ${deviceId}`);
+            console.log(`📋 Shadow updated for tenant ${contextTenantId} ${device.status.toUpperCase()} device ${deviceId}`);
           } catch (shadowError) {
-            console.warn(`⚠️ Failed to update shadow for ${deviceId}:`, shadowError.message);
+            console.warn(`⚠️ Failed to update shadow for tenant ${contextTenantId} device ${deviceId}:`, shadowError.message);
           }
         }
 
@@ -3072,17 +1706,23 @@ app.post('/api/iot/scenario', async (req, res) => {
           payload,
           features: targetFeatures,
           deviceStatus: device.status,
+          tenantId: contextTenantId,
           note: 'Partial command sent - waiting for hardware acknowledgment'
         });
 
       } catch (error) {
-        console.error(`❌ Error executing scenario for device ${deviceId}:`, error);
-        results.push({ deviceId, success: false, error: error.message });
+        console.error(`❌ Error executing scenario for tenant ${contextTenantId} device ${deviceId}:`, error);
+        results.push({
+          deviceId,
+          success: false,
+          error: error.message,
+          tenantId: contextTenantId
+        });
       }
     }
 
-    // Broadcast scenario execution
-    broadcast({
+    // Broadcast scenario execution to tenant clients only
+    broadcastToTenant(contextTenantId, {
       type: 'scenario_executed',
       scenario: {
         name: scenario,
@@ -3090,6 +1730,7 @@ app.post('/api/iot/scenario', async (req, res) => {
       },
       deviceIds: onlineDevices,
       results,
+      tenantId: contextTenantId,
       timestamp: new Date().toISOString()
     });
 
@@ -3097,12 +1738,13 @@ app.post('/api/iot/scenario', async (req, res) => {
     const featureList = Object.keys(targetFeatures).join(', ');
     res.json({
       success: true,
-      message: `Partial scenario executed on ${successful}/${onlineDevices.length} ONLINE/ACTIVE devices for features: ${featureList}`,
+      message: `Partial scenario executed on ${successful}/${onlineDevices.length} ONLINE/ACTIVE devices for tenant ${contextTenantId} features: ${featureList}`,
       scenario: scenario,
       features: targetFeatures,
       devicesAffected: onlineDevices.length,
       skippedDevices: offlineDevices.length,
       results,
+      tenantId: contextTenantId,
       note: 'Partial commands sent - dashboard will update when devices send acknowledgments on relay/ack topic'
     });
 
@@ -3116,13 +1758,21 @@ app.post('/api/iot/scenario', async (req, res) => {
   }
 });
 
-// Additional API routes (remaining routes)
+// Get available things (not tenant-specific)
 app.get('/api/iot/available-things', async (req, res) => {
   try {
     const result = await iot.listThings().promise();
 
+    // Get all registered device IDs across all tenants
+    const allRegisteredDevices = new Set();
+    tenantAwsThings.forEach((devices) => {
+      devices.forEach((device, deviceId) => {
+        allRegisteredDevices.add(deviceId);
+      });
+    });
+
     const thingsList = result.things
-      .filter(thing => !awsThings.has(thing.thingName))
+      .filter(thing => !allRegisteredDevices.has(thing.thingName))
       .map(thing => ({
         thingName: thing.thingName,
         thingArn: thing.thingArn,
@@ -3147,30 +1797,47 @@ app.get('/api/iot/available-things', async (req, res) => {
   }
 });
 
+// Get tenant-specific devices
 app.get('/api/iot/things', async (req, res) => {
   try {
-    // Return current device list with real-time status
-    const deviceList = Array.from(awsThings.values()).map(device => ({
-      ...device,
-      features: device.features || {
-        siren: false,
-        beacon: false,
-        announcement: false,
-        dispenser: false
-      },
-      status: device.status || 'offline',
-      lastSeen: device.lastSeen || 'Never',
-      lastUpdateTime: device.lastUpdateTime || new Date().toISOString()
-    }));
+    const contextTenantId = req.tenantId;
+
+    if (!contextTenantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tenant context is required',
+        devices: []
+      });
+    }
+
+    const tenantDevices = getTenantDevices(contextTenantId);
+
+    // FIXED: Ensure devices are properly filtered by tenant ID
+    const deviceList = Array.from(tenantDevices.values())
+      .filter(device => device.tenantId === contextTenantId) // Add explicit tenant filter
+      .map(device => ({
+        ...device,
+        features: device.features || {
+          siren: false,
+          beacon: false,
+          announcement: false,
+          dispenser: false
+        },
+        status: device.status || 'offline',
+        lastSeen: device.lastSeen || 'Never',
+        lastUpdateTime: device.lastUpdateTime || new Date().toISOString(),
+        tenantId: contextTenantId
+      }));
 
     res.json({
       success: true,
       devices: deviceList,
+      tenantId: contextTenantId,
       timestamp: new Date().toISOString(),
       count: deviceList.length
     });
   } catch (error) {
-    console.error('❌ Error listing devices:', error);
+    console.error('❌ Error listing devices for tenant:', req.tenantId, error);
     res.status(500).json({
       success: false,
       error: 'Failed to list devices',
@@ -3180,21 +1847,38 @@ app.get('/api/iot/things', async (req, res) => {
   }
 });
 
-// Delete thing with proper cleanup
+// Delete thing with tenant context and proper cleanup
 app.delete('/api/iot/things/:thingName', async (req, res) => {
   try {
     const thingName = req.params.thingName;
+    const contextTenantId = req.tenantId;
+
+    if (!contextTenantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tenant context is required'
+      });
+    }
+
+    const tenantDevices = getTenantDevices(contextTenantId);
+    if (!tenantDevices.has(thingName)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Device not found in tenant'
+      });
+    }
 
     // Stop monitoring for this device
-    stopDeviceStatusMonitoring(thingName);
+    stopDeviceStatusMonitoring(contextTenantId, thingName);
 
-    // Update AWS thing to remove registered flag
+    // Update AWS thing to remove tenant-specific attributes
     try {
       const awsThing = await iot.describeThing({ thingName }).promise();
       const newAttributes = { ...awsThing.attributes };
       delete newAttributes.registered;
       delete newAttributes.registeredAt;
       delete newAttributes.displayName;
+      delete newAttributes.tenantId;
 
       await iot.updateThing({
         thingName,
@@ -3202,6 +1886,19 @@ app.delete('/api/iot/things/:thingName', async (req, res) => {
       }).promise();
     } catch (awsError) {
       console.warn('⚠️ AWS update failed:', awsError.message);
+    }
+
+    // Remove from DynamoDB
+    try {
+      await dynamoDb.delete({
+        TableName: TABLES.TENANT_DEVICES,
+        Key: {
+          tenantId: contextTenantId,
+          deviceId: thingName
+        }
+      }).promise();
+    } catch (dbError) {
+      console.warn('⚠️ DynamoDB delete failed:', dbError.message);
     }
 
     // Unsubscribe from MQTT topics
@@ -3212,35 +1909,43 @@ app.delete('/api/iot/things/:thingName', async (req, res) => {
         `${thingName}/relay/ack`,
         `${thingName}/relay/control`
       ];
-      
+
       topics.forEach(topic => {
         mqttClient.unsubscribe(topic);
         subscribedTopics.delete(topic);
       });
-      
-      console.log(`📡 Unsubscribed from ${thingName} MQTT topics`);
+
+      console.log(`📡 Unsubscribed from tenant ${contextTenantId} device ${thingName} MQTT topics`);
     }
 
-    // Remove from memory and tracking
-    awsThings.delete(thingName);
-    deviceStatus.delete(thingName);
-    deviceStateHashes.delete(thingName);
-    lastBroadcastTimes.delete(thingName);
-    deviceLastConnection.delete(thingName);
-    deviceLastRelayStatus.delete(thingName);
-    deviceLastAck.delete(thingName);
-    deviceConnectedToAWS.delete(thingName);
+    // Remove from tenant memory and tracking
+    tenantDevices.delete(thingName);
+    const tenantDeviceStatusMap = getTenantDeviceStatus(contextTenantId);
+    tenantDeviceStatusMap.delete(thingName);
 
-    // Broadcast deletion
-    broadcast({
+    // Clean up tenant-specific tracking maps
+    const deviceLastConnection = tenantDeviceLastConnection.get(contextTenantId);
+    const deviceLastRelayStatus = tenantDeviceLastRelayStatus.get(contextTenantId);
+    const deviceLastAck = tenantDeviceLastAck.get(contextTenantId);
+    const deviceConnectedToAWS = tenantDeviceConnectedToAWS.get(contextTenantId);
+
+    if (deviceLastConnection) deviceLastConnection.delete(thingName);
+    if (deviceLastRelayStatus) deviceLastRelayStatus.delete(thingName);
+    if (deviceLastAck) deviceLastAck.delete(thingName);
+    if (deviceConnectedToAWS) deviceConnectedToAWS.delete(thingName);
+
+    // Broadcast deletion to tenant clients only
+    broadcastToTenant(contextTenantId, {
       type: 'device_deleted',
       deviceId: thingName,
+      tenantId: contextTenantId,
       timestamp: new Date().toISOString()
     });
 
     res.json({
       success: true,
-      message: 'Device unregistered successfully'
+      message: 'Device unregistered successfully from tenant',
+      tenantId: contextTenantId
     });
 
   } catch (error) {
@@ -3253,36 +1958,45 @@ app.delete('/api/iot/things/:thingName', async (req, res) => {
   }
 });
 
-// Manual status simulation endpoint for testing
+// Manual status simulation endpoint for testing with tenant context
 app.post('/api/iot/simulate-device-status/:deviceId', async (req, res) => {
   try {
     const deviceId = req.params.deviceId;
-    const { 
+    const contextTenantId = req.tenantId;
+    const {
       connectionStatus = 'connected',
-      relay1 = false, 
-      relay2 = false, 
-      relay3 = false, 
-      relay4 = false, 
-      signal_strength = 85, 
-      battery_level = 100 
+      relay1 = false,
+      relay2 = false,
+      relay3 = false,
+      relay4 = false,
+      signal_strength = 85,
+      battery_level = 100
     } = req.body;
 
-    if (!awsThings.has(deviceId)) {
-      return res.status(404).json({
+    if (!contextTenantId) {
+      return res.status(400).json({
         success: false,
-        error: 'Device not found'
+        error: 'Tenant context is required'
       });
     }
 
-    console.log('🔴 Simulating device messages for:', deviceId);
+    const tenantDevices = getTenantDevices(contextTenantId);
+    if (!tenantDevices.has(deviceId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Device not found in tenant'
+      });
+    }
+
+    console.log('🔴 Simulating device messages for tenant:', contextTenantId, 'device:', deviceId);
 
     // Simulate connection status
-    processDeviceStatusUpdate(deviceId, {
+    processDeviceStatusUpdate(contextTenantId, deviceId, {
       status: connectionStatus
     }, 'connection');
 
     // Simulate relay acknowledgment (actual hardware status)
-    processDeviceStatusUpdate(deviceId, {
+    processDeviceStatusUpdate(contextTenantId, deviceId, {
       relay1: Boolean(relay1),
       relay2: Boolean(relay2),
       relay3: Boolean(relay3),
@@ -3296,6 +2010,7 @@ app.post('/api/iot/simulate-device-status/:deviceId', async (req, res) => {
       success: true,
       message: 'Device status simulated successfully',
       deviceId,
+      tenantId: contextTenantId,
       connectionStatus,
       relayStates: {
         relay1: Boolean(relay1),
@@ -3303,7 +2018,7 @@ app.post('/api/iot/simulate-device-status/:deviceId', async (req, res) => {
         relay3: Boolean(relay3),
         relay4: Boolean(relay4)
       },
-      newStatus: calculateDeviceStatus(deviceId),
+      newStatus: calculateDeviceStatus(contextTenantId, deviceId),
       note: 'Simulated both connection status and relay acknowledgment'
     });
 
@@ -3317,38 +2032,243 @@ app.post('/api/iot/simulate-device-status/:deviceId', async (req, res) => {
   }
 });
 
+// Groups API with tenant context
+app.get('/api/groups', async (req, res) => {
+  try {
+    const contextTenantId = req.tenantId;
+
+    if (!contextTenantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tenant context is required',
+        groups: []
+      });
+    }
+
+    // Load groups from DynamoDB for this tenant
+    const result = await dynamoDb.query({
+      TableName: TABLES.TENANT_GROUPS,
+      KeyConditionExpression: 'tenantId = :tenantId',
+      ExpressionAttributeValues: {
+        ':tenantId': contextTenantId
+      }
+    }).promise();
+
+    const groups = result.Items || [];
+
+    res.json({
+      success: true,
+      groups: groups,
+      tenantId: contextTenantId,
+      count: groups.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching groups for tenant:', req.tenantId, error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch groups',
+      message: error.message,
+      groups: []
+    });
+  }
+});
+
+app.post('/api/groups', async (req, res) => {
+  try {
+    const { name, description, color, deviceIds, tenantId } = req.body;
+    const contextTenantId = tenantId || req.tenantId;
+
+    if (!contextTenantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tenant context is required'
+      });
+    }
+
+    if (!name) {
+      return res.status(400).json({
+        success: false,
+        error: 'Group name is required'
+      });
+    }
+
+    const groupId = `group_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const group = {
+      tenantId: contextTenantId,
+      groupId: groupId,
+      id: groupId, // For compatibility
+      name,
+      description: description || '',
+      color: color || 'blue',
+      devices: deviceIds || [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    // Store in DynamoDB
+    await dynamoDb.put({
+      TableName: TABLES.TENANT_GROUPS,
+      Item: group
+    }).promise();
+
+    // Update local tenant groups cache
+    const tenantGroupsMap = getTenantGroups(contextTenantId);
+    tenantGroupsMap.set(groupId, group);
+
+    res.status(201).json({
+      success: true,
+      group: group,
+      tenantId: contextTenantId,
+      message: 'Group created successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ Error creating group:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to create group',
+      message: error.message
+    });
+  }
+});
+
+// Status sync endpoints with tenant context
+app.post('/api/iot/sync-status/:deviceId', async (req, res) => {
+  try {
+    const deviceId = req.params.deviceId;
+    const contextTenantId = req.tenantId;
+
+    if (!contextTenantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tenant context is required'
+      });
+    }
+
+    const tenantDevices = getTenantDevices(contextTenantId);
+    if (!tenantDevices.has(deviceId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Device not found in tenant'
+      });
+    }
+
+    console.log(`📊 Manual status sync requested for tenant ${contextTenantId} device: ${deviceId}`);
+
+    // Load status from shadow
+    await loadDeviceStatusFromShadow(contextTenantId, deviceId);
+
+    res.json({
+      success: true,
+      message: 'Status sync initiated',
+      deviceId: deviceId,
+      tenantId: contextTenantId
+    });
+
+  } catch (error) {
+    console.error('❌ Error syncing device status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to sync device status',
+      message: error.message
+    });
+  }
+});
+
+app.post('/api/iot/refresh-all-status', async (req, res) => {
+  try {
+    const contextTenantId = req.tenantId;
+
+    if (!contextTenantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tenant context is required'
+      });
+    }
+
+    console.log(`🔄 Manual refresh all status for tenant: ${contextTenantId}`);
+
+    const tenantDevices = getTenantDevices(contextTenantId);
+    const deviceCount = tenantDevices.size;
+
+    // Refresh status for all tenant devices
+    const promises = Array.from(tenantDevices.keys()).map(deviceId =>
+      loadDeviceStatusFromShadow(contextTenantId, deviceId)
+    );
+
+    await Promise.allSettled(promises);
+
+    res.json({
+      success: true,
+      message: `Status refresh initiated for ${deviceCount} devices in tenant ${contextTenantId}`,
+      tenantId: contextTenantId,
+      deviceCount: deviceCount
+    });
+
+  } catch (error) {
+    console.error('❌ Error refreshing all device status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to refresh device status',
+      message: error.message
+    });
+  }
+});
+
 // Initialize enhanced tracking on startup
+function initializeDeviceTracking() {
+  // Clear existing tracking
+  tenantDeviceLastConnection.clear();
+  tenantDeviceLastRelayStatus.clear();
+  tenantDeviceLastAck.clear();
+  tenantDeviceConnectedToAWS.clear();
+
+  console.log('🔄 Initialized multi-tenant device tracking with enhanced status logic');
+}
+
 initializeDeviceTracking();
 
 // Start HTTP server
 server.listen(PORT, () => {
-  console.log(`🚀 ELPRO AWS IoT Backend Server running on port ${PORT}`);
+  console.log(`🚀 ELPRO AWS IoT Multi-Tenant Backend Server running on port ${PORT}`);
   console.log(`🌐 WebSocket server running on port ${WS_PORT}`);
   console.log(`📡 CORS enabled for frontend connections`);
+  console.log(`🏢 Multi-tenant support enabled with DynamoDB storage`);
 
   // Initialize AWS connection
   initializeAWSConnection();
 
   console.log('\n📋 Available API Endpoints:');
-  console.log('  GET  /api/health - Health check');
-  console.log('  GET  /api/iot/things - List registered devices');
+  console.log('  GET  /api/health - Health check (with tenant stats)');
+  console.log('  GET  /api/iot/things - List tenant devices (requires X-Tenant-ID header)');
   console.log('  GET  /api/iot/available-things - List unregistered things');
-  console.log('  POST /api/iot/register-thing - Register existing thing');
-  console.log('  DELETE /api/iot/things/:thingName - Unregister thing');
-  console.log('  POST /api/iot/command - Send MQTT command (ACTIVE devices only)');
+  console.log('  POST /api/iot/register-thing - Register thing to tenant (requires tenantId)');
+  console.log('  DELETE /api/iot/things/:thingName - Unregister thing from tenant');
+  console.log('  POST /api/iot/command - Send MQTT command (tenant-specific)');
+  console.log('  POST /api/iot/scenario - Execute scenario (tenant-specific)');
+  console.log('  GET  /api/groups - List tenant groups');
+  console.log('  POST /api/groups - Create tenant group');
   console.log('  POST /api/iot/simulate-device-status/:deviceId - Simulate device messages');
 
-  console.log('\n🎯 FIXED MQTT TOPIC MANAGEMENT:');
+  console.log('\n🏢 MULTI-TENANT FEATURES:');
+  console.log('  🔐 Each admin gets isolated environment');
+  console.log('  📊 Separate device/group management per tenant');
+  console.log('  💾 DynamoDB storage for tenant data persistence');
+  console.log('  📡 WebSocket tenant context for real-time updates');
+  console.log('  🎯 Tenant-filtered MQTT message processing');
+
+  console.log('\n🎯 MQTT TOPIC MANAGEMENT:');
   console.log('  📡 Monitoring Topics:');
   console.log('    🔗 deviceId/connection - Device connection status');
   console.log('    📊 deviceId/relay/status - Relay status (every 10 seconds)');
   console.log('    ✅ deviceId/relay/ack - Relay acknowledgment (actual hardware)');
   console.log('    📤 deviceId/relay/control - Control commands');
-  console.log('  ✅ Status Logic:');
+  console.log('  ✅ Status Logic (per tenant):');
   console.log('    📴 OFFLINE: No connection status for 20+ minutes');
   console.log('    🟡 ONLINE: Connection status "connected" but no relay updates');
   console.log('    🟢 ACTIVE: Connection "connected" + relay status updates');
-  console.log('  ✅ Real-time Updates:');
+  console.log('  ✅ Real-time Updates (tenant-filtered):');
   console.log('    🔗 Connection status determines online/offline');
   console.log('    📊 Relay status shows device is actively communicating');
   console.log('    ✅ Relay ACK updates actual feature states in dashboard');
@@ -3356,22 +2276,32 @@ server.listen(PORT, () => {
 
   console.log('\n🧪 Testing Commands:');
   console.log('  POST /api/iot/simulate-device-status/zonex_3');
+  console.log('  Headers: { "X-Tenant-ID": "your-tenant-id" }');
   console.log('  Body: {');
   console.log('    "connectionStatus": "connected",');
   console.log('    "relay1": true, "relay2": false, "relay3": false, "relay4": false');
   console.log('  }');
+
+  console.log('\n📋 DynamoDB Tables Required:');
+  console.log('  📊 elpro-tenants - Tenant information');
+  console.log('  🏢 elpro-tenant-devices - Tenant-specific devices');
+  console.log('  📁 elpro-tenant-groups - Tenant-specific groups');
+  console.log('  ⚙️ elpro-tenant-settings - Tenant-specific settings');
+  console.log('  📈 elpro-tenant-activity - Tenant-specific activity logs');
 });
 
-// Graceful shutdown
+// Graceful shutdown with multi-tenant cleanup
 process.on('SIGINT', () => {
   console.log('\n🛑 Shutting down gracefully...');
 
-  // Stop all device monitoring
-  statusCheckIntervals.forEach((intervalId, deviceId) => {
-    clearInterval(intervalId);
-    console.log(`🛑 Stopped monitoring for ${deviceId}`);
+  // Stop all device monitoring for all tenants
+  tenantStatusCheckIntervals.forEach((intervals, tenantId) => {
+    intervals.forEach((intervalId, deviceId) => {
+      clearInterval(intervalId);
+      console.log(`🛑 Stopped monitoring for tenant ${tenantId} device ${deviceId}`);
+    });
   });
-  statusCheckIntervals.clear();
+  tenantStatusCheckIntervals.clear();
 
   // Close MQTT connection
   if (mqttClient) {
@@ -3384,7 +2314,7 @@ process.on('SIGINT', () => {
     console.log('✅ WebSocket server closed');
     server.close(() => {
       console.log('✅ HTTP server closed');
-      console.log('👋 ELPRO Backend shutdown complete');
+      console.log('👋 ELPRO Multi-Tenant Backend shutdown complete');
       process.exit(0);
     });
   });
